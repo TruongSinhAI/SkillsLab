@@ -1,0 +1,54 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "skills-lab"
+version = "3.0.0"
+description = "MCP Server for AI coding agents — save, search, evolve technical knowledge as Skills (SKILL.md standard)"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.10"
+authors = [{name = "Skills Lab"}]
+keywords = ["mcp", "ai", "knowledge-management", "skills", "skill-md", "coding-agent", "copilot", "claude"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+
+dependencies = [
+    "mcp>=1.0.0",
+    "sqlalchemy>=2.0",
+    "rank-bm25>=0.2",
+    "numpy>=1.24",
+    "fastapi>=0.100",
+    "uvicorn>=0.20",
+    "python-dotenv>=1.0",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+semantic = ["sentence-transformers>=2.0", "torch"]
+dev = ["pytest>=7.0", "httpx"]
+all = ["sentence-transformers>=2.0", "torch", "pytest>=7.0", "httpx"]
+
+[project.scripts]
+skills-lab = "cli:main"
+
+[project.urls]
+Homepage = "https://github.com/skills-lab/skills-lab"
+Documentation = "https://github.com/skills-lab/skills-lab#readme"
+Repository = "https://github.com/skills-lab/skills-lab"
+"Bug Tracker" = "https://github.com/skills-lab/skills-lab/issues"
+
+[tool.setuptools.packages.find]
+include = ["core*", "dashboard*", "cli*"]
+
+[tool.setuptools.package-dir]
+"" = "."

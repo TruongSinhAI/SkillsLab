@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+*.pyo
+.env
+workspace/brain.db
+workspace/skills/
+*.egg-info/
+dist/
+build/
+.venv/
