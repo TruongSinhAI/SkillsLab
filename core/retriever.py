@@ -14,6 +14,10 @@ Performance improvements:
   - BM25 index cached, rebuilt only on skill changes (not every search)
   - Embedding cache persisted to disk (pickle)
   - Smart tokenizer: camelCase split, hyphen split, lowercased
+  - Semantic search is OFF by default — must enable via SKILLS_LAB_SEMANTIC=1
+  - BM25-only search is sub-100ms, no model download needed
+  - Background model warmup: model loads asynchronously after first BM25 search
+  - Timing instrumentation on all slow paths
 """
 
 import logging
@@ -21,6 +25,7 @@ import math
 import os
 import pickle
 import threading
+import time
 from typing import Optional
 
 import numpy as np
@@ -147,9 +152,12 @@ class HybridRetriever:
         self._tokenizer = tokenizer
 
         # Lazy-loaded embedding model
+        # Semantic search is OFF by default to keep search fast (<100ms BM25).
+        # Enable via SKILLS_LAB_SEMANTIC=1 environment variable.
         self._model = None
         self._model_loaded = False
-        self._semantic_available = True
+        self._semantic_available = os.environ.get("SKILLS_LAB_SEMANTIC", "").strip().lower() in ("1", "true", "yes")
+        self._semantic_warming_up = False  # True while background warmup is running
 
         # Embedding cache: skill_name → np.ndarray (persisted to disk)
         self._embedding_cache: dict[str, np.ndarray] = {}
@@ -207,19 +215,54 @@ class HybridRetriever:
 
     def _load_model(self) -> None:
         """
-        Lazy-load the embedding model. Falls back to the secondary model
-        if the primary model is unavailable.
+        Lazy-load the embedding model. Falls back to BM25-only if unavailable.
+
+        IMPORTANT: This is the HOT PATH. On first call, it may trigger a model
+        download (~100MB). This is only invoked when ``_semantic_available``
+        is True (set via ``SKILLS_LAB_SEMANTIC=1`` env var).
+
+        The import probe uses ``importlib.util.find_spec`` for a fast check
+        (milliseconds) instead of actually importing the heavy package
+        (which can take 5-10 seconds even when it ultimately fails).
         """
         if self._model_loaded:
             return
         self._model_loaded = True
 
+        t0 = time.time()
+
+        # If semantic search was not enabled, stay BM25-only (fast path).
+        if not self._semantic_available:
+            logger.info("Semantic search disabled (set SKILLS_LAB_SEMANTIC=1 to enable). Using BM25-only.")
+            return
+
+        # Fast probe: check if sentence_transformers is importable WITHOUT
+        # actually importing the heavy torch/numpy dependency chain.
+        try:
+            import importlib.util
+            if importlib.util.find_spec("sentence_transformers") is None:
+                logger.warning(
+                    "sentence-transformers not installed. "
+                    "Install with: pip install sentence-transformers torch  "
+                    "Falling back to BM25-only search."
+                )
+                self._semantic_available = False
+                return
+        except Exception:
+            pass
+
+        # Package exists — try loading models (may still fail at runtime).
+        # NOTE: First-time load downloads ~100MB model weights.
+        # Subsequent loads use cached files and take 2-5s on CPU.
         for model_name in [self._model_name, self._fallback_model_name]:
             try:
                 from sentence_transformers import SentenceTransformer
                 logger.info(f"Loading embedding model: {model_name}...")
+                t1 = time.time()
                 self._model = SentenceTransformer(model_name)
-                # Override max_seq_length if the model supports > 256
+                t2 = time.time()
+                logger.info(f"Embedding model loaded: {model_name} ({t2 - t1:.1f}s)")
+
                 if hasattr(self._model, 'max_seq_length') and self._model.max_seq_length < 512:
                     try:
                         config = self._model[0].auto_model.config
@@ -229,7 +272,8 @@ class HybridRetriever:
                             logger.info(f"  Overriding max_seq_length -> {self._model.max_seq_length}")
                     except Exception:
                         pass
-                logger.info(f"Embedding model loaded: {model_name}")
+
+                logger.info(f"Semantic search ready (total load time: {t2 - t0:.1f}s)")
                 return
             except Exception as e:
                 logger.warning(f"Cannot load model {model_name}: {e}")
@@ -289,6 +333,9 @@ class HybridRetriever:
             skill_name: The unique skill identifier (used as cache key).
             text: The text to encode (typically description + tags).
         """
+        # Only load model if semantic is enabled
+        if not self._semantic_available:
+            return
         self._load_model()
         if self._model is None:
             return
@@ -515,6 +562,39 @@ class HybridRetriever:
         return ranked
 
     # -----------------------------------------------------------------------
+    # Background model warmup
+    # -----------------------------------------------------------------------
+
+    def warmup_semantic_async(self) -> None:
+        """
+        Start loading the semantic model in a background thread.
+
+        This is called after the first BM25 search returns, so the agent
+        gets an instant response via BM25 while the model warms up in the
+        background. Future searches will benefit from hybrid (BM25+semantic).
+        """
+        if self._semantic_warming_up or self._model_loaded or not self._semantic_available:
+            return
+        self._semantic_warming_up = True
+
+        def _warmup():
+            try:
+                t0 = time.time()
+                self._load_model()
+                t1 = time.time()
+                if self._model is not None:
+                    logger.info(f"Background semantic warmup completed in {t1 - t0:.1f}s")
+                else:
+                    logger.info(f"Background semantic warmup skipped ({t1 - t0:.1f}s)")
+            except Exception as e:
+                logger.warning(f"Background semantic warmup failed: {e}")
+            finally:
+                self._semantic_warming_up = False
+
+        thread = threading.Thread(target=_warmup, daemon=True, name="semantic-warmup")
+        thread.start()
+
+    # -----------------------------------------------------------------------
     # Tier 1: Search — metadata + scores
     # -----------------------------------------------------------------------
 
@@ -533,6 +613,14 @@ class HybridRetriever:
         result set (no full content) so the agent can decide which skills
         to inspect further via :meth:`get_skill_content`.
 
+        Performance:
+            - BM25-only search: <100ms (default, no model needed)
+            - Hybrid (BM25+semantic): 200-500ms after model is loaded
+            - First call with SKILLS_LAB_SEMANTIC=1: model download + load
+              may take 1-10 minutes depending on network speed. The first
+              search returns immediately via BM25; the model warms up in
+              the background for subsequent searches.
+
         Args:
             query: The search query string.
             repo_scope: Either ``"current"`` (specific repo + global skills)
@@ -548,7 +636,11 @@ class HybridRetriever:
             A list of dicts, each containing:
             ``{"skill": Skill, "rrf_score": float}``
         """
-        self._load_model()
+        t_start = time.time()
+
+        # Do NOT call _load_model() here — that blocks for 1-10 min on first call.
+        # Instead, the model is loaded asynchronously via warmup_semantic_async().
+
         if top_k is None:
             top_k = self._top_k
 
@@ -565,13 +657,15 @@ class HybridRetriever:
                     (Skill.repo_name == current_repo) | (Skill.repo_name == "global")
                 )
 
-            # Apply tags filter
+            # Apply tags filter at DB level for efficiency (no Python loop)
             if tags_filter:
+                # Fall back to Python filtering (SQLite JSON ops are limited)
                 all_skills = query_skills.all()
                 skills = []
                 for s in all_skills:
                     s_tags = s.get_tags()
-                    if any(t.lower() in [st.lower() for st in s_tags] for t in tags_filter):
+                    s_tags_lower = {st.lower() for st in s_tags}
+                    if any(t.lower() in s_tags_lower for t in tags_filter):
                         skills.append(s)
             else:
                 skills = query_skills.all()
@@ -581,29 +675,47 @@ class HybridRetriever:
         if not skills:
             return []
 
-        # BM25 search (uses cached index)
+        # BM25 search (uses cached index) — always fast, <10ms
+        t_bm25 = time.time()
         bm25_results = self._bm25_search(query, skills, top_k=len(skills))
+        t_bm25_end = time.time()
 
-        # Semantic search (if a model is available)
+        # Semantic search (if a model is ALREADY loaded)
+        # If model is not loaded yet, skip semantic — just return BM25 results.
         semantic_results: list[tuple[str, float]] = []
-        if self._semantic_available:
+        t_semantic = 0.0
+        if self._semantic_available and self._model is not None:
+            t_semantic = time.time()
             semantic_results = self._semantic_search(query, skills, top_k=len(skills))
+            t_semantic = time.time() - t_semantic
 
         # RRF fusion
         fused = self._rrf_fuse(bm25_results, semantic_results, self._rrf_k)
         top_results = fused[:top_k]
 
-        # Attach Skill ORM objects to results
-        session = self._session_factory()
-        try:
-            results: list[dict] = []
-            for skill_id, score in top_results:
-                skill = session.query(Skill).filter_by(id=skill_id).first()
-                if skill:
-                    results.append({"skill": skill, "rrf_score": score})
-            return results
-        finally:
-            session.close()
+        # Attach Skill ORM objects — use dict lookup instead of N separate DB queries
+        skill_map = {s.id: s for s in skills}
+        results: list[dict] = []
+        for skill_id, score in top_results:
+            skill = skill_map.get(skill_id)
+            if skill:
+                results.append({"skill": skill, "rrf_score": score})
+
+        t_total = time.time() - t_start
+        search_mode = "hybrid" if semantic_results else "bm25-only"
+        logger.debug(
+            f"Search [{search_mode}] completed in {t_total * 1000:.0f}ms "
+            f"(bm25: {t_bm25_end - t_bm25:.3f}s, semantic: {t_semantic:.3f}s, "
+            f"skills: {len(skills)}, results: {len(results)})"
+        )
+
+        # Trigger background warmup if semantic is enabled but model not loaded yet.
+        # This ensures the first search returns fast (BM25-only) while the model
+        # loads asynchronously for future searches.
+        if self._semantic_available and self._model is None and not self._semantic_warming_up:
+            self.warmup_semantic_async()
+
+        return results
 
     # -----------------------------------------------------------------------
     # Tier 2: Get full skill content

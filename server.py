@@ -57,9 +57,14 @@ EMBEDDING_MODEL = os.environ.get(
 )
 SEARCH_TOP_K = int(os.environ.get("SEARCH_TOP_K", "5"))
 
+SEMANTIC_ENABLED = os.environ.get("SKILLS_LAB_SEMANTIC", "").strip().lower() in ("1", "true", "yes")
+
 logger.info(f"Workspace: {WORKSPACE_PATH}")
 logger.info(f"Embedding model: {EMBEDDING_MODEL}")
 logger.info(f"Search Top-K: {SEARCH_TOP_K}")
+logger.info(f"Semantic search: {'ENABLED' if SEMANTIC_ENABLED else 'DISABLED (BM25-only, fast)'}")
+if not SEMANTIC_ENABLED:
+    logger.info("  → To enable: set SKILLS_LAB_SEMANTIC=1 in env/mcp.json")
 
 # ---------------------------------------------------------------------------
 # Init
