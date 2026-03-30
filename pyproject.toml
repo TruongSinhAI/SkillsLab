@@ -35,8 +35,8 @@ dependencies = [
 
 [project.optional-dependencies]
 semantic = ["sentence-transformers>=2.0", "torch"]
-dev = ["pytest>=7.0", "httpx"]
-all = ["sentence-transformers>=2.0", "torch", "pytest>=7.0", "httpx"]
+dev = ["pytest>=7.0", "pytest-cov>=4.0", "httpx"]
+all = ["sentence-transformers>=2.0", "torch", "pytest>=7.0", "pytest-cov>=4.0", "httpx"]
 
 [project.scripts]
 skills-lab = "cli:main"
