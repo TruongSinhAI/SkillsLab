@@ -57,14 +57,36 @@ EMBEDDING_MODEL = os.environ.get(
 )
 SEARCH_TOP_K = int(os.environ.get("SEARCH_TOP_K", "5"))
 
-SEMANTIC_ENABLED = os.environ.get("SKILLS_LAB_SEMANTIC", "").strip().lower() in ("1", "true", "yes")
+from core.model_manager import is_model_cached
+
+# Semantic search auto-detection:
+#   SKILLS_LAB_SEMANTIC=0 → explicitly disabled
+#   SKILLS_LAB_SEMANTIC=1 → explicitly enabled
+#   Default (empty)     → auto-detect: enable if model is cached
+env_semantic = os.environ.get("SKILLS_LAB_SEMANTIC", "").strip().lower()
+if env_semantic in ("0", "false", "no"):
+    SEMANTIC_ENABLED = False
+    _semantic_reason = "explicitly disabled via SKILLS_LAB_SEMANTIC=0"
+elif env_semantic in ("1", "true", "yes"):
+    SEMANTIC_ENABLED = True
+    _semantic_reason = "explicitly enabled via SKILLS_LAB_SEMANTIC=1"
+else:
+    _model_cached = is_model_cached(EMBEDDING_MODEL, WORKSPACE_PATH)
+    SEMANTIC_ENABLED = _model_cached
+    _semantic_reason = (
+        "AUTO-ENABLED (model cached)" if _model_cached
+        else "DISABLED (model not cached)"
+    )
 
 logger.info(f"Workspace: {WORKSPACE_PATH}")
 logger.info(f"Embedding model: {EMBEDDING_MODEL}")
 logger.info(f"Search Top-K: {SEARCH_TOP_K}")
-logger.info(f"Semantic search: {'ENABLED' if SEMANTIC_ENABLED else 'DISABLED (BM25-only, fast)'}")
+logger.info(f"Semantic search: {_semantic_reason}")
 if not SEMANTIC_ENABLED:
-    logger.info("  → To enable: set SKILLS_LAB_SEMANTIC=1 in env/mcp.json")
+    if env_semantic in ("0", "false", "no"):
+        logger.info("  → To enable: unset SKILLS_LAB_SEMANTIC or set SKILLS_LAB_SEMANTIC=1")
+    else:
+        logger.info("  → To enable: run 'skills-lab download-model' or set SKILLS_LAB_SEMANTIC=1")
 
 # ---------------------------------------------------------------------------
 # Init

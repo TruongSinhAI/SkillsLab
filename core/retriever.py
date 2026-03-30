@@ -5,7 +5,7 @@ Skills Lab — Hybrid Retriever (SKILL.md Standard)
   Tier 1: search_skills(query) → metadata + scores (for agent to decide)
   Tier 2: get_skill_content(name) → full SKILL.md body
 
-Hybrid search: BM25 (name+desc+tags+repo) + Semantic (desc+tags) + RRF(k=60).
+Hybrid search: BM25 (name+desc+tags+repo+body) + Semantic (desc+tags) + RRF(k=60).
 Model: bge-small-en-v1.5 (512 tokens, 384 dims) or fallback all-MiniLM-L6-v2.
 Batch embedding for performance.
 Dedup detection (cosine > 0.85).
@@ -14,7 +14,9 @@ Performance improvements:
   - BM25 index cached, rebuilt only on skill changes (not every search)
   - Embedding cache persisted to disk (pickle)
   - Smart tokenizer: camelCase split, hyphen split, lowercased
-  - Semantic search is OFF by default — must enable via SKILLS_LAB_SEMANTIC=1
+  - Semantic search auto-enables when the model is already cached/downloaded
+  - SKILLS_LAB_SEMANTIC=0 explicitly disables even if cached
+  - SKILLS_LAB_SEMANTIC=1 explicitly enables even if not cached (triggers download)
   - BM25-only search is sub-100ms, no model download needed
   - Background model warmup: model loads asynchronously after first BM25 search
   - Timing instrumentation on all slow paths
@@ -33,6 +35,7 @@ from rank_bm25 import BM25Okapi
 from sqlalchemy.orm import Session
 
 from core.models import Skill, SkillChangelog
+from core.model_manager import is_model_cached
 
 logger = logging.getLogger(__name__)
 
@@ -152,12 +155,42 @@ class HybridRetriever:
         self._tokenizer = tokenizer
 
         # Lazy-loaded embedding model
-        # Semantic search is OFF by default to keep search fast (<100ms BM25).
-        # Enable via SKILLS_LAB_SEMANTIC=1 environment variable.
+        # Semantic search auto-enables when the model is cached.
+        # Override with SKILLS_LAB_SEMANTIC=0 (disable) or =1 (force enable).
         self._model = None
         self._model_loaded = False
-        self._semantic_available = os.environ.get("SKILLS_LAB_SEMANTIC", "").strip().lower() in ("1", "true", "yes")
         self._semantic_warming_up = False  # True while background warmup is running
+
+        # Determine semantic availability:
+        #   1. SKILLS_LAB_SEMANTIC=0 → explicitly disabled
+        #   2. SKILLS_LAB_SEMANTIC=1 → explicitly enabled (may trigger download)
+        #   3. Default (empty/unset) → auto-detect: enable if model is cached
+        env_semantic = os.environ.get("SKILLS_LAB_SEMANTIC", "").strip().lower()
+        if env_semantic in ("0", "false", "no"):
+            self._semantic_available = False
+            logger.info(
+                "Semantic search: DISABLED "
+                "(explicitly disabled via SKILLS_LAB_SEMANTIC=0)"
+            )
+        elif env_semantic in ("1", "true", "yes"):
+            self._semantic_available = True
+            logger.info(
+                "Semantic search: ENABLED "
+                "(explicitly enabled via SKILLS_LAB_SEMANTIC=1)"
+            )
+        else:
+            # Auto-detect: check if the model is cached locally
+            cached = is_model_cached(self._model_name, self._workspace_path)
+            self._semantic_available = cached
+            if cached:
+                logger.info(
+                    "Semantic search: AUTO-ENABLED (model cached)"
+                )
+            else:
+                logger.info(
+                    "Semantic search: DISABLED (model not cached, "
+                    "run 'skills-lab download-model' to enable)"
+                )
 
         # Embedding cache: skill_name → np.ndarray (persisted to disk)
         self._embedding_cache: dict[str, np.ndarray] = {}
@@ -233,7 +266,7 @@ class HybridRetriever:
 
         # If semantic search was not enabled, stay BM25-only (fast path).
         if not self._semantic_available:
-            logger.info("Semantic search disabled (set SKILLS_LAB_SEMANTIC=1 to enable). Using BM25-only.")
+            logger.info("Semantic search not available. Using BM25-only.")
             return
 
         # Fast probe: check if sentence_transformers is importable WITHOUT
@@ -377,7 +410,12 @@ class HybridRetriever:
         Build the BM25 index from scratch using the given skill list.
 
         The index is built over the concatenated text of
-        ``skill.id + description + tags + repo_name``.
+        ``skill.id + description + tags + repo_name + body`` (body truncated
+        to 2000 characters). Uses ``self._manager.get_search_text()`` to
+        retrieve the full searchable text including body content.
+
+        Falls back to metadata-only indexing if the manager is unavailable or
+        body read fails.
 
         Args:
             skills: The list of active Skill ORM objects to index.
@@ -391,16 +429,27 @@ class HybridRetriever:
             corpus_tokens: list[list[str]] = []
             skill_ids: list[str] = []
             for skill in skills:
-                tags = skill.get_tags()
-                repo = skill.repo_name or "global"
-                text = f"{skill.id} {skill.description} {' '.join(tags)} {repo}"
+                # Use manager's get_search_text() which includes body (truncated to 2000 chars)
+                if self._manager is not None:
+                    try:
+                        text = self._manager.get_search_text(skill.id)
+                    except Exception:
+                        # Fallback to metadata-only if body read fails
+                        tags = skill.get_tags()
+                        repo = skill.repo_name or "global"
+                        text = f"{skill.id} {skill.description} {' '.join(tags)} {repo}"
+                else:
+                    # No manager available — metadata-only indexing
+                    tags = skill.get_tags()
+                    repo = skill.repo_name or "global"
+                    text = f"{skill.id} {skill.description} {' '.join(tags)} {repo}"
                 corpus_tokens.append(self._tokenizer(text))
                 skill_ids.append(skill.id)
 
             self._bm25_index = BM25Okapi(corpus_tokens)
             self._bm25_skill_ids = skill_ids
             self._bm25_dirty = False
-            logger.debug(f"BM25 index rebuilt: {len(skill_ids)} skills")
+            logger.debug(f"BM25 index rebuilt: {len(skill_ids)} skills (with body text)")
 
     def _get_or_build_bm25(self, skills: list[Skill]) -> tuple:
         """

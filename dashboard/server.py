@@ -52,6 +52,32 @@ WORKSPACE_PATH = os.environ.get(
 
 init_db(WORKSPACE_PATH)
 
+# ---------------------------------------------------------------------------
+# Singleton instances for SKILLManager and HybridRetriever
+# ---------------------------------------------------------------------------
+
+from core.manager import SKILLManager
+from core.retriever import HybridRetriever
+
+_mgr: SKILLManager | None = None
+_ret: HybridRetriever | None = None
+
+
+def _get_manager() -> SKILLManager:
+    """Lazily create the SKILLManager singleton."""
+    global _mgr
+    if _mgr is None:
+        _mgr = SKILLManager(WORKSPACE_PATH)
+    return _mgr
+
+
+def _get_retriever() -> HybridRetriever:
+    """Lazily create the HybridRetriever singleton."""
+    global _ret
+    if _ret is None:
+        _ret = HybridRetriever(session_factory=get_session, manager=_get_manager(), workspace_path=WORKSPACE_PATH)
+    return _ret
+
 app = FastAPI(title="Skills Lab Dashboard", version="2.1 (SKILL.md Standard)")
 
 # ---------------------------------------------------------------------------
@@ -193,8 +219,7 @@ def get_skill_content(name: str):
         if not skill:
             raise HTTPException(status_code=404, detail=f"Skill '{name}' not found")
 
-        from core.manager import SKILLManager
-        mgr = SKILLManager(WORKSPACE_PATH)
+        mgr = _get_manager()
         try:
             data = mgr.read_skill(name)
             return {
@@ -212,11 +237,7 @@ def get_skill_content(name: str):
 @app.get("/api/skills/{name}/lineage")
 def get_skill_lineage(name: str):
     """Get lineage tree for a skill."""
-    from core.retriever import HybridRetriever
-    from core.manager import SKILLManager
-
-    mgr = SKILLManager(WORKSPACE_PATH)
-    ret = HybridRetriever(session_factory=get_session, manager=mgr, workspace_path=WORKSPACE_PATH)
+    ret = _get_retriever()
     tree = ret.get_lineage_tree(name)
     if not tree:
         raise HTTPException(status_code=404, detail=f"Skill '{name}' not found")
@@ -232,8 +253,7 @@ def get_references(name: str):
         if not skill:
             raise HTTPException(status_code=404, detail=f"Skill '{name}' not found")
 
-        from core.manager import SKILLManager
-        mgr = SKILLManager(WORKSPACE_PATH)
+        mgr = _get_manager()
 
         try:
             data = mgr.read_skill(name)
@@ -266,7 +286,7 @@ def get_references(name: str):
             try:
                 other_data = mgr.read_skill(other.id)
                 other_body = other_data.get("body", "")
-                if name in bracket_refs_pattern_match(other_body, name) or name in plain_refs_match(other_body, name, all_skill_ids):
+                if name in bracket_refs_pattern_match(other_body, name) or plain_refs_match(other_body, name, all_skill_ids):
                     incoming.append(other.id)
             except (FileNotFoundError, Exception):
                 # If we cannot read a skill, just skip it
@@ -350,7 +370,6 @@ def extend_ttl(name: str, req: ExtendTTLRequest):
 def create_skill(req: CreateSkillRequest):
     """Create a new skill via dashboard."""
     import json as _json
-    from core.manager import SKILLManager
     from core.evolver import EvolutionEngine
     from core.models import Skill as SkillModel
 
@@ -369,7 +388,7 @@ def create_skill(req: CreateSkillRequest):
         if existing:
             raise HTTPException(status_code=409, detail=f"Skill '{name}' already exists.")
 
-        mgr = SKILLManager(WORKSPACE_PATH)
+        mgr = _get_manager()
         engine = EvolutionEngine(session=session, manager=mgr)
 
         parsed_tags = [t.strip().lower() for t in req.tags.split(",") if t.strip()] if req.tags else []
@@ -400,7 +419,6 @@ def create_skill(req: CreateSkillRequest):
 @app.delete("/api/skills/{name}")
 def delete_skill(name: str):
     """Delete a skill entirely (DB + filesystem)."""
-    from core.manager import SKILLManager
 
     session = get_session()
     try:
@@ -415,8 +433,7 @@ def delete_skill(name: str):
         session.commit()
 
         # Delete filesystem
-        mgr = SKILLManager(WORKSPACE_PATH)
-        mgr.delete_skill_dir(name)
+        _get_manager().delete_skill_dir(name)
 
         return {"status": "deleted", "name": name}
     except HTTPException:
@@ -431,7 +448,6 @@ def delete_skill(name: str):
 @app.put("/api/skills/{name}")
 def update_skill(name: str, req: UpdateSkillRequest):
     """Update an existing skill's content."""
-    from core.manager import SKILLManager
 
     session = get_session()
     try:
@@ -439,7 +455,7 @@ def update_skill(name: str, req: UpdateSkillRequest):
         if not skill:
             raise HTTPException(status_code=404, detail=f"Skill '{name}' not found")
 
-        mgr = SKILLManager(WORKSPACE_PATH)
+        mgr = _get_manager()
 
         # Read current SKILL.md
         try:
@@ -474,11 +490,35 @@ def update_skill(name: str, req: UpdateSkillRequest):
                         updated_body += f"- [[{rn}]]\n"
                     break
 
-        # Write updated skill file
+        # Extract metadata from merged frontmatter for write_skill call
+        metadata = updated_frontmatter.get("metadata", {}) or {}
+        updated_description = updated_frontmatter.get("description", "") or ""
+        display_name = updated_frontmatter.get("display_name", "") or ""
+        skill_type = metadata.get("skill-type", "IMPLEMENTATION") if metadata else "IMPLEMENTATION"
+        repo = metadata.get("repo", "global") if metadata else "global"
+        version = int(metadata.get("version", 1)) if metadata else 1
+        tags = metadata.get("tags", []) if metadata else None
+        ttl_days = metadata.get("ttl-days") if metadata else None
+        if ttl_days is not None:
+            ttl_days = int(ttl_days)
+        author = metadata.get("author") if metadata else None
+        source = metadata.get("source") if metadata else None
+        references = metadata.get("references") if metadata else None
+
+        # Write updated skill file with correct write_skill signature
         mgr.write_skill(
-            name=name,
-            frontmatter=updated_frontmatter,
+            skill_name=name,
+            description=updated_description,
             body=updated_body,
+            display_name=display_name,
+            skill_type=skill_type,
+            repo=repo,
+            version=version,
+            tags=tags,
+            ttl_days=ttl_days,
+            author=author,
+            source=source,
+            references=references,
         )
 
         # Update DB fields
@@ -488,8 +528,7 @@ def update_skill(name: str, req: UpdateSkillRequest):
             skill.display_name = req.display_name
         if req.tags:
             parsed_tags = [t.strip().lower() for t in req.tags.split(",") if t.strip()]
-            # Store tags as comma-separated in DB if the column expects that format
-            skill.tags = ",".join(parsed_tags) if hasattr(skill, 'tags') else None
+            skill.set_tags(parsed_tags)
 
         skill.last_modified_at = datetime.now(timezone.utc)
         session.commit()
@@ -530,11 +569,7 @@ def search_skills(request: SearchRequest):
     if not request.query.strip():
         raise HTTPException(status_code=400, detail="Query parameter is required.")
 
-    from core.retriever import HybridRetriever
-    from core.manager import SKILLManager
-
-    mgr = SKILLManager(WORKSPACE_PATH)
-    ret = HybridRetriever(session_factory=get_session, manager=mgr, workspace_path=WORKSPACE_PATH)
+    ret = _get_retriever()
 
     # Parse tags filter
     tags = [t.strip().lower() for t in request.tags_filter.split(",") if t.strip()] if request.tags_filter else None
@@ -774,6 +809,22 @@ def analytics_network():
 def analytics_gaps():
     """Identify potential coverage gaps."""
     return _get_analytics().get_coverage_gaps()
+
+
+# ---------------------------------------------------------------------------
+# Version Diff Endpoint
+# ---------------------------------------------------------------------------
+
+@app.get("/api/skills/{name}/diff")
+def get_skill_diff(name: str, v1: str = Query("1", description="First version"), v2: str = Query("current", description="Second version")):
+    """Get unified diff between two versions of a skill."""
+    try:
+        result = _get_manager().get_version_diff(name, v1, v2)
+        return result
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # ---------------------------------------------------------------------------

@@ -13,6 +13,7 @@ Usage:
     skills-lab import <file>    Import skills from JSON file
     skills-lab stats            Show workspace statistics
     skills-lab search <query>   Search skills by name, description, tags
+    skills-lab download-model   Download embedding model for semantic search
     skills-lab version          Show version
 
 Install:
@@ -257,6 +258,23 @@ docs(readme): update installation instructions
     print(f"   Workspace:  {workspace}")
     print(f"   Skills created: {created}")
     print(f"   SKILL.md files: {os.path.join(workspace, 'skills/')}")
+
+    # Auto-download embedding model
+    print(f"\n  Downloading embedding model...")
+    print(f"   (this may take a minute on first run)")
+    try:
+        from core.model_manager import download_with_fallback
+        success, loaded_model = download_with_fallback(workspace)
+        if success:
+            print(f"   Semantic search model ready: {loaded_model}")
+        else:
+            print(f"   [warn] Could not download embedding model.")
+            print(f"          Semantic search will use BM25-only mode.")
+            print(f"          Run 'skills-lab download-model' to retry later.")
+    except Exception as e:
+        print(f"   [warn] Model download skipped: {e}")
+        print(f"          Run 'skills-lab download-model' to download manually.")
+
     print(f"\n   Try: skills-lab run-mcp")
     print(f"        skills-lab run-dashboard")
 
@@ -344,6 +362,62 @@ def cmd_sync(args):
     print(f"   Imported: {imported}")
     print(f"   Skipped (already in DB): {skipped}")
     print(f"   Errors: {errors}")
+
+
+def cmd_download_model(args):
+    """Download the embedding model for semantic search.
+
+    Usage:
+        skills-lab download-model              # Download default model
+        skills-lab download-model <model_name> # Download specific model
+    """
+    _ensure_project_root()
+    from core.model_manager import (
+        DEFAULT_MODEL,
+        FALLBACK_MODEL,
+        download_embedding_model,
+        download_with_fallback,
+    )
+
+    workspace = _get_workspace()
+
+    parser = argparse.ArgumentParser(prog="skills-lab download-model")
+    parser.add_argument(
+        "model_name",
+        nargs="?",
+        default=None,
+        help=f"Model name to download (default: {DEFAULT_MODEL})",
+    )
+    parsed = _parse_known_args(args, parser)
+
+    model_name = parsed.model_name
+
+    print()
+    if model_name:
+        # Download a specific model
+        print(f"  Downloading embedding model: {model_name}")
+        success = download_embedding_model(model_name, workspace)
+        if success:
+            print(f"  Model '{model_name}' downloaded and ready.")
+        else:
+            print(f"  Failed to download '{model_name}'.")
+            print(f"  Make sure sentence-transformers is installed:")
+            print(f"    pip install sentence-transformers torch")
+    else:
+        # Default: try primary, fallback to backup
+        print(f"  Downloading embedding model...")
+        print(f"  Primary:   {DEFAULT_MODEL}")
+        print(f"  Fallback:  {FALLBACK_MODEL}")
+        print()
+        success, loaded_model = download_with_fallback(workspace)
+        if success:
+            print(f"  Model '{loaded_model}' downloaded and ready.")
+        else:
+            print(f"  Failed to download any embedding model.")
+            print(f"  Semantic search will use BM25-only mode.")
+            print(f"  Make sure sentence-transformers is installed:")
+            print(f"    pip install sentence-transformers torch")
+    print()
 
 
 def cmd_version(args):
@@ -573,6 +647,64 @@ def cmd_search(args):
 
 
 # ---------------------------------------------------------------------------
+# Version diff command
+# ---------------------------------------------------------------------------
+
+def cmd_diff(args):
+    """Show diff between two versions of a skill.
+
+    Usage:
+        skills-lab diff <skill-name> [--v1 1] [--v2 2]
+        skills-lab diff <skill-name> --v1 1          # Diff V1 vs current
+    """
+    _ensure_project_root()
+    from core.manager import SKILLManager
+
+    workspace = _get_workspace()
+    parser = argparse.ArgumentParser(prog="skills-lab diff")
+    parser.add_argument(
+        "skill_name",
+        help="Kebab-case skill name to diff",
+    )
+    parser.add_argument(
+        "--v1",
+        default="1",
+        help="First version to compare (default: 1)",
+    )
+    parser.add_argument(
+        "--v2",
+        default="current",
+        help="Second version to compare (default: current)",
+    )
+    parsed = _parse_known_args(args, parser)
+
+    mgr = SKILLManager(workspace)
+    try:
+        result = mgr.get_version_diff(parsed.skill_name, parsed.v1, parsed.v2)
+    except FileNotFoundError as e:
+        print(f"  [err] {e}")
+        return
+
+    print(f"\n  Diff: {result['skill_name']} (v{result['v1']} → v{result['v2']})")
+    print(f"{'=' * 60}")
+    if result["diff"]:
+        for line in result["diff"].split("\n"):
+            if line.startswith("+++") or line.startswith("---"):
+                print(f"\033[36m{line}\033[0m")  # cyan for headers
+            elif line.startswith("@@"):
+                print(f"\033[33m{line}\033[0m")  # yellow for hunks
+            elif line.startswith("+"):
+                print(f"\033[32m{line}\033[0m")  # green for additions
+            elif line.startswith("-"):
+                print(f"\033[31m{line}\033[0m")  # red for deletions
+            else:
+                print(line)
+    else:
+        print("  No differences found.")
+    print()
+
+
+# ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
 
@@ -597,6 +729,7 @@ Usage:
     skills-lab import <file>    Import skills from JSON file
     skills-lab stats            Show workspace statistics
     skills-lab search <query>   Search skills by name, description, tags
+    skills-lab download-model   Download embedding model for semantic search
     skills-lab version          Show version
 
 Export Options:
@@ -629,6 +762,8 @@ Environment Variables:
     SKILLS_LAB_PORT         Dashboard port (default: 7788)
     SKILLS_LAB_HOST         Dashboard host (default: 0.0.0.0)
     WORKSPACE_FOLDER        Auto-detect repo name for MCP tools
+    SKILLS_LAB_SEMANTIC     Enable semantic search (default: auto-detect)
+                           Set to 0 to explicitly disable, 1 to force enable
         """)
         sys.exit(0)
 
@@ -647,6 +782,9 @@ Environment Variables:
         "stats": cmd_stats,
         "search": cmd_search,
         "version": cmd_version,
+        "download-model": cmd_download_model,
+        "download_model": cmd_download_model,
+        "diff": cmd_diff,
     }
 
     handler = commands.get(cmd)

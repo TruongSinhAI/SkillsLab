@@ -2,8 +2,10 @@ __pycache__/
 *.pyc
 *.pyo
 .env
+brain.db
 workspace/brain.db
 workspace/skills/
+.cache/
 *.egg-info/
 dist/
 build/

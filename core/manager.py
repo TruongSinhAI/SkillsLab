@@ -8,6 +8,7 @@ Manages SKILL.md files following industry standards:
 Each Skill is stored in a directory: workspace/skills/{skill_name}/SKILL.md
 """
 
+import difflib
 import json
 import os
 import re
@@ -16,6 +17,8 @@ from datetime import datetime, timezone
 from typing import Any
 
 import yaml
+
+from core.exceptions import SKILLParseError
 
 
 # ---------------------------------------------------------------------------
@@ -40,10 +43,12 @@ ALLOWED_METADATA_KEYS = {
 }
 
 
-class SKILLParseError(Exception):
-    """Raised when a SKILL.md file cannot be parsed due to invalid format or structure."""
-
-    pass
+def _safe_int(value: str) -> int:
+    """Convert a string to int for sorting, falling back to 0 for non-numeric values."""
+    try:
+        return int(value)
+    except (ValueError, TypeError):
+        return 0
 
 
 class SKILLManager:
@@ -253,6 +258,46 @@ class SKILLManager:
     # Public interface
     # -----------------------------------------------------------------------
 
+    def _history_dir(self, skill_name: str) -> str:
+        """
+        Return the path to the version history directory for a skill.
+
+        Args:
+            skill_name: Kebab-case skill identifier.
+
+        Returns:
+            Path to ``{skill_dir}/.history/``.
+        """
+        return os.path.join(self._skill_dir(skill_name), ".history")
+
+    def _archive_current_version(self, skill_name: str) -> None:
+        """
+        Archive the current SKILL.md to ``.history/v{version}.md`` before overwriting.
+
+        Reads the version number from the existing frontmatter. If no SKILL.md
+        exists or it cannot be read/parsed, this method is a no-op.
+
+        Args:
+            skill_name: Kebab-case skill identifier.
+        """
+        skill_path = self._skill_path(skill_name)
+        if not os.path.exists(skill_path):
+            return
+
+        try:
+            fm = self.read_frontmatter(skill_name)
+            meta = fm.get("metadata", {}) or {}
+            version = meta.get("version", "0")
+
+            history_dir = self._history_dir(skill_name)
+            os.makedirs(history_dir, exist_ok=True)
+
+            archive_path = os.path.join(history_dir, f"v{version}.md")
+            shutil.copy2(skill_path, archive_path)
+        except Exception:
+            # Silently skip archiving if anything fails — don't block writes
+            pass
+
     def write_skill(
         self,
         skill_name: str,
@@ -273,6 +318,10 @@ class SKILLManager:
 
         Creates the skill directory if it does not exist, then writes the
         SKILL.md file with the supplied frontmatter fields and markdown body.
+
+        If a SKILL.md file already exists, the previous version is archived
+        to ``.history/v{old_version}.md`` before overwriting, enabling
+        version diff functionality.
 
         Args:
             skill_name: Kebab-case skill identifier (also used as the directory name).
@@ -300,6 +349,9 @@ class SKILLManager:
             raise ValueError("body is required and cannot be empty")
 
         self._ensure_dir(skill_name)
+
+        # Archive the current version before overwriting
+        self._archive_current_version(skill_name)
 
         now = datetime.now(timezone.utc)
         metadata: dict[str, Any] = {
@@ -617,6 +669,51 @@ class SKILLManager:
         except Exception:
             return skill_name
 
+    def get_search_text(self, skill_name: str) -> str:
+        """
+        Retrieve the full text for BM25 indexing including the body content.
+
+        Returns: ``name + description + tags + repo + body`` (body truncated to
+        2000 characters to avoid excessive tokenization).
+
+        Falls back gracefully to metadata-only text if the body cannot be read.
+
+        Args:
+            skill_name: Kebab-case skill identifier.
+
+        Returns:
+            A single string suitable for BM25 tokenization, including the
+            skill body text for full-text search coverage.
+        """
+        try:
+            fm = self.read_frontmatter(skill_name)
+            name = fm.get("name", skill_name)
+            desc = fm.get("description", "")
+            repo: str = ""
+            tags: list[str] = []
+            if "metadata" in fm and isinstance(fm["metadata"], dict):
+                meta = fm["metadata"]
+                repo = meta.get("repo", "global")
+                tags = meta.get("tags", [])
+                if isinstance(tags, list):
+                    tags = [str(t) for t in tags]
+
+            # Attempt to read the body for full-text indexing
+            body = ""
+            try:
+                body = self.read_body(skill_name)
+            except Exception:
+                pass
+
+            # Truncate body to 2000 chars to avoid excessive tokenization
+            if len(body) > 2000:
+                body = body[:2000]
+
+            parts = [name, desc, " ".join(tags), repo, body]
+            return " ".join(parts)
+        except Exception:
+            return skill_name
+
     # -----------------------------------------------------------------------
     # References support
     # -----------------------------------------------------------------------
@@ -728,6 +825,120 @@ class SKILLManager:
 
         with open(path, "w", encoding="utf-8") as f:
             f.write(new_raw)
+
+    def list_skill_versions(self, skill_name: str) -> list[dict[str, str]]:
+        """
+        List all archived version snapshots for a skill.
+
+        Each entry includes the version number and the file modification time.
+
+        Args:
+            skill_name: Kebab-case skill identifier.
+
+        Returns:
+            A sorted list of dicts, each with ``"version"`` (str) and
+            ``"path"`` (str) keys. Returns an empty list if the history
+            directory does not exist or contains no snapshots.
+        """
+        history_dir = self._history_dir(skill_name)
+        if not os.path.isdir(history_dir):
+            return []
+
+        versions: list[dict[str, str]] = []
+        for filename in os.listdir(history_dir):
+            if filename.startswith("v") and filename.endswith(".md"):
+                version_num = filename[1:-3]  # Strip "v" prefix and ".md" suffix
+                file_path = os.path.join(history_dir, filename)
+                versions.append({
+                    "version": version_num,
+                    "path": file_path,
+                })
+
+        # Sort by version number numerically (handle non-numeric gracefully)
+        versions.sort(key=lambda v: _safe_int(v["version"]))
+        return versions
+
+    def _read_version_snapshot(self, skill_name: str, version: str) -> str:
+        """
+        Read the content of a specific version snapshot.
+
+        If ``version`` is ``"current"``, reads the current SKILL.md file.
+
+        Args:
+            skill_name: Kebab-case skill identifier.
+            version: Version number as a string, or ``"current"`` for the
+                live SKILL.md file.
+
+        Returns:
+            The raw file content as a string.
+
+        Raises:
+            FileNotFoundError: If the requested snapshot file does not exist.
+        """
+        if version == "current":
+            path = self._skill_path(skill_name)
+        else:
+            path = os.path.join(self._history_dir(skill_name), f"v{version}.md")
+
+        if not os.path.exists(path):
+            raise FileNotFoundError(
+                f"Version snapshot not found: v{version} for skill '{skill_name}'"
+            )
+
+        with open(path, "r", encoding="utf-8") as f:
+            return f.read()
+
+    def get_version_diff(
+        self,
+        skill_name: str,
+        version_a: str,
+        version_b: str = "current",
+    ) -> dict[str, str]:
+        """
+        Compute a unified diff between two versions of a skill.
+
+        Uses Python's ``difflib.unified_diff`` to produce a standard diff output.
+
+        Args:
+            skill_name: Kebab-case skill identifier.
+            version_a: The first version to compare (e.g. ``"1"``).
+            version_b: The second version to compare. Defaults to ``"current"``,
+                which uses the live SKILL.md file.
+
+        Returns:
+            A dict with keys:
+
+            - ``"skill_name"``: The skill identifier.
+            - ``"v1"``: The first version string.
+            - ``"v2"``: The second version string.
+            - ``"diff"``: The unified diff as a string (empty if the versions
+              are identical or both files are missing).
+
+        Raises:
+            FileNotFoundError: If either version snapshot does not exist.
+        """
+        text_a = self._read_version_snapshot(skill_name, version_a)
+        text_b = self._read_version_snapshot(skill_name, version_b)
+
+        lines_a = text_a.splitlines(keepends=True)
+        lines_b = text_b.splitlines(keepends=True)
+
+        diff_lines = difflib.unified_diff(
+            lines_a,
+            lines_b,
+            fromfile=f"v{version_a}",
+            tofile=f"v{version_b}",
+            lineterm="",
+        )
+
+        diff_text = "\n".join(diff_lines)
+
+        return {
+            "skill_name": skill_name,
+            "v1": version_a,
+            "v2": version_b,
+            "diff": diff_text,
+        }
 
     def find_referencing_skills(self, skill_name: str) -> list[str]:
         """
