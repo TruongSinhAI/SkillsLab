@@ -11,6 +11,7 @@ Entry point. Communicates via stdio with AI agents (GitHub Copilot, Claude, Curs
 Run with: python server.py
 """
 
+import asyncio
 import json
 import logging
 import os
@@ -187,7 +188,9 @@ async def search_skills(
 
         tags = _parse_tags(tags_filter) if tags_filter else None
 
-        results = retriever.search(
+        # Run synchronous retriever.search() in a thread to avoid blocking the event loop
+        results = await asyncio.to_thread(
+            retriever.search,
             query=query,
             repo_scope=repo_scope,
             current_repo=current_repo,
@@ -264,7 +267,7 @@ async def get_skill(name: str) -> str:
         name: Skill name (kebab-case), e.g. "cors-fix-nextjs-api".
     """
     try:
-        data = retriever.get_skill_content(name)
+        data = await asyncio.to_thread(retriever.get_skill_content, name)
         if not data:
             return f"Skill '{name}' does not exist.\n\nCall search_skills() to find a suitable skill."
 
@@ -383,58 +386,63 @@ async def save_skill(
 
             ttl = int(ttl_days) if ttl_days and int(ttl_days) > 0 else None
 
-            if action == "ARCHIVE":
-                skill = engine.archive(
-                    name=name,
-                    description=description,
-                    body=body,
-                    skill_type=skill_type,
-                    repo_name=repo_name,
-                    display_name=display_name,
-                    tags=parsed_tags if parsed_tags else None,
-                    ttl_days=ttl,
-                    author=author or None,
-                )
-                action_desc = "Created new Skill (ARCHIVE)"
+            # Wrap the synchronous engine operations in a thread
+            def _execute_evolution():
+                if action == "ARCHIVE":
+                    skill = engine.archive(
+                        name=name,
+                        description=description,
+                        body=body,
+                        skill_type=skill_type,
+                        repo_name=repo_name,
+                        display_name=display_name,
+                        tags=parsed_tags if parsed_tags else None,
+                        ttl_days=ttl,
+                        author=author or None,
+                    )
+                    action_desc = "Created new Skill (ARCHIVE)"
 
-            elif action == "FIX":
-                skill = engine.fix(
-                    target_skill_name=target_skill_name,
-                    body=body,
-                    lesson=lesson,
-                    reason=reason,
-                    description=description or None,
-                    tags=parsed_tags or None,
-                )
-                action_desc = f"Fixed Skill → V{skill.version_number}"
+                elif action == "FIX":
+                    skill = engine.fix(
+                        target_skill_name=target_skill_name,
+                        body=body,
+                        lesson=lesson,
+                        reason=reason,
+                        description=description or None,
+                        tags=parsed_tags or None,
+                    )
+                    action_desc = f"Fixed Skill → V{skill.version_number}"
 
-            elif action == "DERIVE":
-                skill = engine.derive(
-                    target_skill_name=target_skill_name,
-                    new_name=name,
-                    body=body,
-                    description=description,
-                    lesson=lesson,
-                    repo_name=repo_name,
-                    reason=reason,
-                    skill_type=skill_type,
-                    tags=parsed_tags or None,
-                )
-                action_desc = f"Derived Skill → {name} V1"
+                elif action == "DERIVE":
+                    skill = engine.derive(
+                        target_skill_name=target_skill_name,
+                        new_name=name,
+                        body=body,
+                        description=description,
+                        lesson=lesson,
+                        repo_name=repo_name,
+                        reason=reason,
+                        skill_type=skill_type,
+                        tags=parsed_tags or None,
+                    )
+                    action_desc = f"Derived Skill → {name} V1"
 
-            elif action == "MERGE":
-                sources = [s.strip() for s in source_skill_names.split(",") if s.strip()]
-                skill = engine.merge(
-                    target_skill_name=name,
-                    source_skill_names=sources,
-                    new_body=body,
-                    reason=reason,
-                    description=description or None,
-                    tags=parsed_tags or None,
-                )
-                action_desc = f"Merged {len(sources)} skills → {name} V{skill.version_number}"
+                elif action == "MERGE":
+                    sources = [s.strip() for s in source_skill_names.split(",") if s.strip()]
+                    skill = engine.merge(
+                        target_skill_name=name,
+                        source_skill_names=sources,
+                        new_body=body,
+                        reason=reason,
+                        description=description or None,
+                        tags=parsed_tags or None,
+                    )
+                    action_desc = f"Merged {len(sources)} skills → {name} V{skill.version_number}"
 
-            session.commit()
+                session.commit()
+                return skill, action_desc
+
+            skill, action_desc = await asyncio.to_thread(_execute_evolution)
 
             # Flush embedding cache to disk
             retriever.flush_cache()

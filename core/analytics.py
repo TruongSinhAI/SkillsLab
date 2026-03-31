@@ -447,31 +447,37 @@ class SkillsAnalytics:
     def get_orphan_skills(self) -> list[dict]:
         """Get skills that have no references and are not referenced by others.
 
-        Uses ``SKILLManager.find_referencing_skills`` and ``get_references``
+        Uses ``SKILLManager.get_references`` and ``find_referencing_skills``
         to determine whether a skill is connected to any other skill.
 
-        Returns:
-            ``[{name, display_name, skill_type, created_at}]``
+        Optimized: builds a single reference map in O(N) file reads instead of O(N²).
         """
         session = get_session()
         try:
             skills = session.query(Skill).all()
-            result = []
 
+            # Build reference map in a single pass: skill_id → set of referenced skill_ids
+            # This avoids calling find_referencing_skills() per skill (which does O(N) reads each)
+            ref_map: dict[str, set[str]] = {}
             for s in skills:
-                # Check outgoing references
                 try:
-                    outgoing = self.manager.get_references(s.id)
+                    refs = self.manager.get_references(s.id)
+                    ref_map[s.id] = set(refs)
                 except (FileNotFoundError, SKILLParseError):
-                    outgoing = []
+                    ref_map[s.id] = set()
 
-                # Check incoming references
-                try:
-                    incoming = self.manager.find_referencing_skills(s.id)
-                except (FileNotFoundError, SKILLParseError):
-                    incoming = []
+            # Build reverse map: skill_id → set of skills that reference it
+            referenced_by: dict[str, set[str]] = {s.id: set() for s in skills}
+            for src, targets in ref_map.items():
+                for tgt in targets:
+                    if tgt in referenced_by:
+                        referenced_by[tgt].add(src)
 
-                if not outgoing and not incoming:
+            result = []
+            for s in skills:
+                has_outgoing = bool(ref_map.get(s.id))
+                has_incoming = bool(referenced_by.get(s.id))
+                if not has_outgoing and not has_incoming:
                     result.append(
                         {
                             "name": s.id,

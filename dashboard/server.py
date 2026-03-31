@@ -286,6 +286,8 @@ def get_skill_lineage(name: str):
 @app.get("/api/skills/{name}/references")
 def get_references(name: str):
     """Get skills referenced by this skill and skills that reference it."""
+    import re
+
     session = get_session()
     try:
         skill = session.query(Skill).filter_by(id=name).first()
@@ -294,21 +296,17 @@ def get_references(name: str):
 
         mgr = _get_manager()
 
+        # --- Outgoing references (1 file read) ---
         try:
             data = mgr.read_skill(name)
             raw_body = data.get("body", "")
         except FileNotFoundError:
             raw_body = ""
 
-        # Parse references: look for patterns like [[skill-name]] or plain skill names
-        # that match known skill IDs in the database
-        import re
         all_skill_ids = {s.id for s in session.query(Skill.id).all()}
 
-        # Find bracket-style references [[skill-name]]
         bracket_refs = set(re.findall(r"\[\[([a-z0-9-]+)\]\]", raw_body))
 
-        # Find plain skill-name references that exist in the DB
         plain_refs = set()
         for sid in all_skill_ids:
             if sid != name and re.search(r"\b" + re.escape(sid) + r"\b", raw_body, re.IGNORECASE):
@@ -316,19 +314,40 @@ def get_references(name: str):
 
         outgoing = sorted(bracket_refs | plain_refs)
 
-        # Find skills that reference this skill (incoming references)
+        # --- Incoming references (DB-based: check metadata.references column) ---
+        # Avoid O(N) file reads by using the DB-stored references field first,
+        # then only scan bodies of candidates for plain/bracket references.
         incoming = []
+
+        # Strategy 1: Check metadata.references in other skills' frontmatter
         all_skills = session.query(Skill).all()
         for other in all_skills:
             if other.id == name:
                 continue
+            other_tags = other.get_tags()  # just to check references stored in DB
+            # Check if this skill's description or tags mention the target
+            # (lightweight DB-only check before expensive file reads)
+            other_refs = []
             try:
-                other_data = mgr.read_skill(other.id)
-                other_body = other_data.get("body", "")
-                if name in bracket_refs_pattern_match(other_body, name) or plain_refs_match(other_body, name, all_skill_ids):
+                fm = mgr.read_frontmatter(other.id)
+                meta = fm.get("metadata", {}) or {}
+                other_refs = meta.get("references", [])
+                if isinstance(other_refs, list):
+                    if name in [str(r) for r in other_refs]:
+                        incoming.append(other.id)
+                        continue
+            except (FileNotFoundError, Exception):
+                pass
+
+            # Strategy 2: Only if DB check didn't match, scan body for [[name]]
+            try:
+                other_body = mgr.read_body(other.id)
+                if f"[[{name}]]" in other_body:
+                    incoming.append(other.id)
+                elif re.search(r"\b" + re.escape(name) + r"\b", other_body, re.IGNORECASE):
+                    # Verify it's a genuine reference (at least 3 chars of context)
                     incoming.append(other.id)
             except (FileNotFoundError, Exception):
-                # If we cannot read a skill, just skip it
                 pass
 
         return {
@@ -365,6 +384,9 @@ def deprecate_skill(name: str, req: DeprecateRequest):
         skill.is_active = False
         skill.last_modified_at = datetime.now(timezone.utc)
         session.commit()
+
+        # Invalidate BM25 index (active skill list changed)
+        _get_retriever().invalidate_all()
 
         return {"status": "deprecated", "name": name, "reason": req.reason}
     except HTTPException:
@@ -428,7 +450,13 @@ def create_skill(req: CreateSkillRequest):
             raise HTTPException(status_code=409, detail=f"Skill '{name}' already exists.")
 
         mgr = _get_manager()
-        engine = EvolutionEngine(session=session, manager=mgr)
+        ret = _get_retriever()
+        engine = EvolutionEngine(
+            session=session,
+            manager=mgr,
+            on_embedding_cache_clear=ret.clear_cache,
+            on_embedding_compute=ret.compute_and_cache_embedding,
+        )
 
         parsed_tags = [t.strip().lower() for t in req.tags.split(",") if t.strip()] if req.tags else []
         ttl = int(req.ttl_days) if req.ttl_days and int(req.ttl_days) > 0 else None
@@ -443,6 +471,7 @@ def create_skill(req: CreateSkillRequest):
             ttl_days=ttl,
         )
         session.commit()
+        ret.flush_cache()
         return {"status": "created", "skill": skill.to_dict()}
     except HTTPException:
         raise
@@ -473,6 +502,11 @@ def delete_skill(name: str):
 
         # Delete filesystem
         _get_manager().delete_skill_dir(name)
+
+        # Invalidate BM25 index and embedding cache
+        ret = _get_retriever()
+        ret.clear_cache(name)
+        ret.flush_cache()
 
         return {"status": "deleted", "name": name}
     except HTTPException:
@@ -571,6 +605,11 @@ def update_skill(name: str, req: UpdateSkillRequest):
 
         skill.last_modified_at = datetime.now(timezone.utc)
         session.commit()
+
+        # Invalidate BM25 index and embedding cache (content changed)
+        ret = _get_retriever()
+        ret.clear_cache(name)
+        ret.flush_cache()
 
         return {
             "status": "updated",
@@ -802,10 +841,13 @@ _analytics: SkillsAnalytics | None = None
 
 
 def _get_analytics() -> SkillsAnalytics:
-    """Lazily create the analytics engine singleton."""
+    """Lazily create the analytics engine singleton (thread-safe)."""
     global _analytics
     if _analytics is None:
-        _analytics = SkillsAnalytics(WORKSPACE_PATH)
+        with _singleton_lock:
+            if _analytics is None:
+                _analytics = SkillsAnalytics(WORKSPACE_PATH)
+                logger.info("SkillsAnalytics singleton created")
     return _analytics
 
 

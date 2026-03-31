@@ -160,6 +160,7 @@ class HybridRetriever:
         self._model = None
         self._model_loaded = False
         self._semantic_warming_up = False  # True while background warmup is running
+        self._model_lock = threading.Lock()  # Protects model load from race conditions
 
         # Determine semantic availability:
         #   1. SKILLS_LAB_SEMANTIC=0 → explicitly disabled
@@ -231,14 +232,22 @@ class HybridRetriever:
                 self._embedding_cache = {}
 
     def _save_embedding_cache(self) -> None:
-        """Persist the embedding cache to disk."""
+        """Persist the embedding cache to disk.
+
+        Build the pickle bytes under the lock, then release the lock before
+        performing the actual file I/O to avoid blocking other threads that
+        only need read access to ``_embedding_cache``.
+        """
         if not self._cache_dir:
             return
         try:
+            # Snapshot the cache under lock (fast dict copy)
             with self._cache_lock:
                 path = self._cache_path()
-                with open(path, "wb") as f:
-                    pickle.dump(self._embedding_cache, f, protocol=pickle.HIGHEST_PROTOCOL)
+                cache_snapshot = dict(self._embedding_cache)
+            # File I/O outside lock
+            with open(path, "wb") as f:
+                pickle.dump(cache_snapshot, f, protocol=pickle.HIGHEST_PROTOCOL)
         except Exception as e:
             logger.warning(f"Failed to save embedding cache: {e}")
 
@@ -250,6 +259,9 @@ class HybridRetriever:
         """
         Lazy-load the embedding model. Falls back to BM25-only if unavailable.
 
+        Thread-safe: uses ``_model_lock`` to prevent concurrent loads from
+        background warmup thread and main search thread.
+
         IMPORTANT: This is the HOT PATH. On first call, it may trigger a model
         download (~100MB). This is only invoked when ``_semantic_available``
         is True (set via ``SKILLS_LAB_SEMANTIC=1`` env var).
@@ -258,63 +270,64 @@ class HybridRetriever:
         (milliseconds) instead of actually importing the heavy package
         (which can take 5-10 seconds even when it ultimately fails).
         """
-        if self._model_loaded:
-            return
-        self._model_loaded = True
-
-        t0 = time.time()
-
-        # If semantic search was not enabled, stay BM25-only (fast path).
-        if not self._semantic_available:
-            logger.info("Semantic search not available. Using BM25-only.")
-            return
-
-        # Fast probe: check if sentence_transformers is importable WITHOUT
-        # actually importing the heavy torch/numpy dependency chain.
-        try:
-            import importlib.util
-            if importlib.util.find_spec("sentence_transformers") is None:
-                logger.warning(
-                    "sentence-transformers not installed. "
-                    "Install with: pip install sentence-transformers torch  "
-                    "Falling back to BM25-only search."
-                )
-                self._semantic_available = False
+        with self._model_lock:
+            if self._model_loaded:
                 return
-        except Exception:
-            pass
+            self._model_loaded = True
 
-        # Package exists — try loading models (may still fail at runtime).
-        # NOTE: First-time load downloads ~100MB model weights.
-        # Subsequent loads use cached files and take 2-5s on CPU.
-        for model_name in [self._model_name, self._fallback_model_name]:
+            t0 = time.time()
+
+            # If semantic search was not enabled, stay BM25-only (fast path).
+            if not self._semantic_available:
+                logger.info("Semantic search not available. Using BM25-only.")
+                return
+
+            # Fast probe: check if sentence_transformers is importable WITHOUT
+            # actually importing the heavy torch/numpy dependency chain.
             try:
-                from sentence_transformers import SentenceTransformer
-                logger.info(f"Loading embedding model: {model_name}...")
-                t1 = time.time()
-                self._model = SentenceTransformer(model_name)
-                t2 = time.time()
-                logger.info(f"Embedding model loaded: {model_name} ({t2 - t1:.1f}s)")
+                import importlib.util
+                if importlib.util.find_spec("sentence_transformers") is None:
+                    logger.warning(
+                        "sentence-transformers not installed. "
+                        "Install with: pip install sentence-transformers torch  "
+                        "Falling back to BM25-only search."
+                    )
+                    self._semantic_available = False
+                    return
+            except Exception:
+                pass
 
-                if hasattr(self._model, 'max_seq_length') and self._model.max_seq_length < 512:
-                    try:
-                        config = self._model[0].auto_model.config
-                        max_pos = config.max_position_embeddings
-                        if max_pos > self._model.max_seq_length:
-                            self._model.max_seq_length = min(max_pos, 512)
-                            logger.info(f"  Overriding max_seq_length -> {self._model.max_seq_length}")
-                    except Exception:
-                        pass
+            # Package exists — try loading models (may still fail at runtime).
+            # NOTE: First-time load downloads ~100MB model weights.
+            # Subsequent loads use cached files and take 2-5s on CPU.
+            for model_name in [self._model_name, self._fallback_model_name]:
+                try:
+                    from sentence_transformers import SentenceTransformer
+                    logger.info(f"Loading embedding model: {model_name}...")
+                    t1 = time.time()
+                    self._model = SentenceTransformer(model_name)
+                    t2 = time.time()
+                    logger.info(f"Embedding model loaded: {model_name} ({t2 - t1:.1f}s)")
 
-                logger.info(f"Semantic search ready (total load time: {t2 - t0:.1f}s)")
-                return
-            except Exception as e:
-                logger.warning(f"Cannot load model {model_name}: {e}")
-                continue
+                    if hasattr(self._model, 'max_seq_length') and self._model.max_seq_length < 512:
+                        try:
+                            config = self._model[0].auto_model.config
+                            max_pos = config.max_position_embeddings
+                            if max_pos > self._model.max_seq_length:
+                                self._model.max_seq_length = min(max_pos, 512)
+                                logger.info(f"  Overriding max_seq_length -> {self._model.max_seq_length}")
+                        except Exception:
+                            pass
 
-        logger.warning("No embedding model available. Falling back to BM25-only search.")
-        self._model = None
-        self._semantic_available = False
+                    logger.info(f"Semantic search ready (total load time: {t2 - t0:.1f}s)")
+                    return
+                except Exception as e:
+                    logger.warning(f"Cannot load model {model_name}: {e}")
+                    continue
+
+            logger.warning("No embedding model available. Falling back to BM25-only search.")
+            self._model = None
+            self._semantic_available = False
 
     def _get_embedding(self, text: str) -> Optional[np.ndarray]:
         """
@@ -370,7 +383,9 @@ class HybridRetriever:
         if not self._semantic_available:
             return
         self._load_model()
-        if self._model is None:
+        with self._model_lock:
+            model = self._model
+        if model is None:
             return
         emb = self._get_embedding(text)
         if emb is not None:
@@ -459,6 +474,10 @@ class HybridRetriever:
         """
         Return the cached BM25 index, rebuilding it if the dirty flag is set.
 
+        If the index is dirty, triggers a background rebuild and returns the
+        stale index for the current search (stale-while-revalidate pattern).
+        On the very first build (no index at all), falls back to inline build.
+
         Args:
             skills: The full list of active Skill objects (used for rebuild).
 
@@ -466,8 +485,24 @@ class HybridRetriever:
             A tuple of ``(BM25Okapi index, list_of_skill_ids)``.
         """
         if self._bm25_dirty or self._bm25_index is None:
-            self._rebuild_bm25_index(skills)
+            # If we have an existing index, use it while rebuilding in background
+            if self._bm25_index is not None:
+                self._rebuild_bm25_async(skills)
+            else:
+                # First time — must build synchronously
+                self._rebuild_bm25_index(skills)
         return self._bm25_index, self._bm25_skill_ids
+
+    def _rebuild_bm25_async(self, skills: list[Skill]) -> None:
+        """Rebuild BM25 index in a background thread (stale-while-revalidate)."""
+        def _do_rebuild():
+            try:
+                self._rebuild_bm25_index(skills)
+            except Exception as e:
+                logger.error(f"Background BM25 rebuild failed: {e}")
+
+        thread = threading.Thread(target=_do_rebuild, daemon=True, name="bm25-rebuild")
+        thread.start()
 
     # -----------------------------------------------------------------------
     # BM25 Search
@@ -532,7 +567,9 @@ class HybridRetriever:
             A list of ``(skill_id, cosine_similarity)`` tuples, sorted by
             descending similarity.
         """
-        if self._model is None or not skills:
+        with self._model_lock:
+            model = self._model
+        if model is None or not skills:
             return []
 
         # Encode query
@@ -842,7 +879,9 @@ class HybridRetriever:
             ``{"name": str, "similarity": float, "description": str, "version": str}``
         """
         self._load_model()
-        if self._model is None:
+        with self._model_lock:
+            model = self._model
+        if model is None:
             return []
 
         new_emb = self._get_embedding(description)

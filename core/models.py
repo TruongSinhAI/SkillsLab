@@ -371,22 +371,16 @@ def init_db(workspace_path: str) -> None:
 def get_session() -> Session:
     """Return a thread-safe SQLAlchemy session.
 
-    Uses the scoped session factory when available (multi-worker scenarios),
-    falling back to the regular session factory otherwise.
+    Returns a new session from the regular (non-scoped) session factory.
 
-    Returns:
-        A ``Session`` object.  The caller **must** call ``session.close()``
-        when done to release the connection back to the pool.
-
-    Raises:
-        RuntimeError: If the database has not been initialized yet
-                      (``init_db()`` was never called).
+    The caller **must** call ``session.close()`` when done to release the
+    connection back to the pool.  The non-scoped factory is used because
+    ``scoped_session.close()`` only removes the session from the registry
+    without actually closing the underlying connection, which can lead to
+    connection exhaustion under high concurrency.
     """
     if _session_factory is None:
         raise RuntimeError(
             "Database not initialized. Call init_db() first."
         )
-    # Prefer scoped_session for thread safety in multi-worker scenarios.
-    if _scoped_factory is not None:
-        return _scoped_factory()
     return _session_factory()
