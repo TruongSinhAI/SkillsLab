@@ -445,7 +445,12 @@ def create_skill(req: CreateSkillRequest):
 
 @app.delete("/api/skills/{name}")
 def delete_skill(name: str):
-    """Delete a skill entirely (DB + filesystem)."""
+    """Delete a skill entirely (DB + filesystem).
+
+    Deletion strategy: filesystem first, then DB commit. This prevents desync
+    where the DB records are deleted but filesystem files remain (which would
+    happen if we committed DB first and then the filesystem delete failed).
+    """
 
     session = get_session()
     try:
@@ -453,14 +458,13 @@ def delete_skill(name: str):
         if not skill:
             raise HTTPException(status_code=404, detail=f"Skill '{name}' not found")
 
-        # Delete changelog entries first
+        # Delete filesystem FIRST (before committing DB changes)
+        _get_manager().delete_skill_dir(name)
+
+        # Then commit DB changes (changelog + skill row)
         session.query(SkillChangelog).filter(SkillChangelog.skill_id == name).delete()
-        # Delete the skill
         session.delete(skill)
         session.commit()
-
-        # Delete filesystem
-        _get_manager().delete_skill_dir(name)
 
         # Invalidate BM25 index and embedding cache
         ret = _get_retriever()

@@ -248,6 +248,11 @@ class EvolutionEngine:
             raise ValueError(f"Skill does not exist: {target_skill_name}")
         if not skill.is_active:
             raise ValueError(f"Skill '{target_skill_name}' is already inactive.")
+        if not self.manager.skill_dir_exists(target_skill_name):
+            raise ValueError(
+                f"Skill '{target_skill_name}' exists in DB but its SKILL.md file "
+                f"is missing. Cannot FIX without the file. Use ARCHIVE to recreate it."
+            )
 
         old_version = skill.version_number
         new_version = old_version + 1
@@ -458,6 +463,14 @@ class EvolutionEngine:
                 f"Invalid target name '{target_skill_name}'. Must be kebab-case, 2-64 characters."
             )
 
+        # Guard: target cannot also be a source
+        sources_set = set(source_skill_names)
+        if target_skill_name in sources_set:
+            raise ValueError(
+                "Target skill cannot also be a source skill. "
+                "Remove it from source_skill_names."
+            )
+
         sources: list[Skill] = []
         for sname in source_skill_names:
             s = self.session.query(Skill).filter_by(id=sname).first()
@@ -504,6 +517,17 @@ class EvolutionEngine:
 
         if target:
             # Update existing target
+            # Also collect the target's existing lessons to preserve them
+            try:
+                target_body = self.manager.read_body(target_skill_name)
+                if LESSONS_HEADING in target_body:
+                    for line in target_body.split(LESSONS_HEADING)[1].strip().split("\n"):
+                        line = line.strip()
+                        if line.startswith("- **"):
+                            all_lessons.append(f"{line} (from {target.display_name})")
+            except (FileNotFoundError, Exception):
+                pass  # Target has no SKILL.md file — skip its lessons
+
             old_version = target.version_number
             target.version_number = new_version
             target.description = description or target.description
