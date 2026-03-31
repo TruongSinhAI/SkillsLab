@@ -209,7 +209,6 @@ class SKILLManager:
             if not frontmatter["name"] or not isinstance(frontmatter["name"], str):
                 errors.append("'name' must be a non-empty string")
             else:
-                import re
                 if not re.match(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?$", frontmatter["name"]):
                     errors.append(f"'name' must be kebab-case, got: '{frontmatter['name']}'")
 
@@ -639,36 +638,6 @@ class SKILLManager:
             except Exception:
                 return ""
 
-    def get_bm25_text(self, skill_name: str) -> str:
-        """
-        Retrieve the full text for BM25 indexing: name + description + tags + repo.
-
-        Falls back to returning just the ``skill_name`` if parsing fails.
-
-        Args:
-            skill_name: Kebab-case skill identifier.
-
-        Returns:
-            A single string concatenating the skill name, description, tags,
-            and repo, suitable for BM25 tokenization.
-        """
-        try:
-            fm = self.read_frontmatter(skill_name)
-            name = fm.get("name", skill_name)
-            desc = fm.get("description", "")
-            repo: str = ""
-            tags: list[str] = []
-            if "metadata" in fm and isinstance(fm["metadata"], dict):
-                meta = fm["metadata"]
-                repo = meta.get("repo", "global")
-                tags = meta.get("tags", [])
-                if isinstance(tags, list):
-                    tags = [str(t) for t in tags]
-            parts = [name, desc, " ".join(tags), repo]
-            return " ".join(parts)
-        except Exception:
-            return skill_name
-
     def get_search_text(self, skill_name: str) -> str:
         """
         Retrieve the full text for BM25 indexing including the body content.
@@ -758,6 +727,10 @@ class SKILLManager:
 
         The result is a deduplicated, sorted list.
 
+        Performance: reads the SKILL.md file exactly once (single ``read_skill``
+        call), avoiding the previous double-read via ``read_frontmatter`` +
+        ``read_body``.
+
         Args:
             skill_name: Kebab-case skill identifier.
 
@@ -768,8 +741,10 @@ class SKILLManager:
             FileNotFoundError: If the SKILL.md file does not exist.
             SKILLParseError: If the file format is invalid.
         """
-        frontmatter = self.read_frontmatter(skill_name)
-        body = self.read_body(skill_name)
+        # Single file read instead of read_frontmatter() + read_body()
+        data = self.read_skill(skill_name)
+        frontmatter = data["frontmatter"]
+        body = data["body"]
 
         refs: set[str] = set()
 

@@ -730,6 +730,11 @@ class SkillsAnalytics:
         single dictionary.  Useful for rendering a comprehensive dashboard
         in a single API response.
 
+        Optimization: ``get_orphan_skills`` and ``get_skill_network`` both
+        need the full reference map (every skill's outgoing references).
+        By building the reference map once and sharing it, we avoid reading
+        every SKILL.md file twice (halving filesystem I/O).
+
         Returns:
             A dictionary with the following top-level keys:
 
@@ -745,6 +750,21 @@ class SkillsAnalytics:
             - ``skill_network`` — from :meth:`get_skill_network`
             - ``coverage_gaps`` — from :meth:`get_coverage_gaps`
         """
+        # Build the shared reference map once — avoids reading every SKILL.md
+        # file twice (once for orphan detection, once for network graph).
+        session = get_session()
+        try:
+            skills = session.query(Skill).all()
+            ref_map: dict[str, set[str]] = {}
+            for s in skills:
+                try:
+                    refs = self.manager.get_references(s.id)
+                    ref_map[s.id] = set(refs)
+                except (FileNotFoundError, SKILLParseError):
+                    ref_map[s.id] = set()
+        finally:
+            session.close()
+
         return {
             "usage_summary": self.get_usage_summary(),
             "trending_skills": self.get_trending_skills(),
@@ -754,7 +774,123 @@ class SkillsAnalytics:
             "tag_cloud": self.get_tag_cloud(),
             "version_distribution": self.get_version_distribution(),
             "recent_activity": self.get_recent_activity(),
-            "orphan_skills": self.get_orphan_skills(),
-            "skill_network": self.get_skill_network(),
+            "orphan_skills": self._get_orphan_skills_with_map(ref_map),
+            "skill_network": self._get_skill_network_with_map(ref_map),
             "coverage_gaps": self.get_coverage_gaps(),
         }
+
+    def _get_orphan_skills_with_map(self, ref_map: dict[str, set[str]]) -> list[dict]:
+        """Get orphan skills using a pre-built reference map (avoids file reads).
+
+        Args:
+            ref_map: Mapping of skill_id → set of referenced skill_ids.
+
+        Returns:
+            List of orphan skill dicts (no incoming or outgoing references).
+        """
+        session = get_session()
+        try:
+            skills = session.query(Skill).all()
+
+            # Build reverse map: skill_id → set of skills that reference it
+            referenced_by: dict[str, set[str]] = {s.id: set() for s in skills}
+            for src, targets in ref_map.items():
+                for tgt in targets:
+                    if tgt in referenced_by:
+                        referenced_by[tgt].add(src)
+
+            result = []
+            for s in skills:
+                has_outgoing = bool(ref_map.get(s.id))
+                has_incoming = bool(referenced_by.get(s.id))
+                if not has_outgoing and not has_incoming:
+                    result.append(
+                        {
+                            "name": s.id,
+                            "display_name": s.display_name,
+                            "skill_type": s.skill_type,
+                            "created_at": (
+                                s.created_at.isoformat()
+                                if s.created_at
+                                else None
+                            ),
+                        }
+                    )
+
+            return result
+        finally:
+            session.close()
+
+    def _get_skill_network_with_map(self, ref_map: dict[str, set[str]]) -> dict:
+        """Build skill relationship graph using a pre-built reference map.
+
+        Args:
+            ref_map: Mapping of skill_id → set of referenced skill_ids.
+
+        Returns:
+            Dict with ``nodes`` and ``edges`` for visualization.
+        """
+        session = get_session()
+        try:
+            skills = session.query(Skill).all()
+
+            # Build nodes
+            nodes = []
+            for s in skills:
+                nodes.append(
+                    {
+                        "id": s.id,
+                        "name": s.display_name,
+                        "type": s.skill_type,
+                        "group": s.repo_name or "global",
+                        "use_count": s.use_count,
+                    }
+                )
+
+            # Collect all skill names for validation
+            skill_ids = {s.id for s in skills}
+
+            # Build edges — references (from shared ref_map)
+            edges: list[dict] = []
+            seen_edges: set[tuple[str, str, str]] = set()
+
+            for src_id, targets in ref_map.items():
+                for ref in targets:
+                    if ref != src_id and ref in skill_ids:
+                        edge_key = (src_id, ref, "references")
+                        if edge_key not in seen_edges:
+                            seen_edges.add(edge_key)
+                            edges.append(
+                                {
+                                    "source": src_id,
+                                    "target": ref,
+                                    "type": "references",
+                                }
+                            )
+
+            # Build edges — derived_from (database-based)
+            derivations = (
+                session.query(SkillChangelog)
+                .filter(SkillChangelog.trigger == "DERIVE")
+                .filter(SkillChangelog.source_skill_id.isnot(None))
+                .all()
+            )
+
+            for cl in derivations:
+                src = cl.source_skill_id
+                tgt = cl.skill_id
+                if src and tgt and src != tgt and src in skill_ids and tgt in skill_ids:
+                    edge_key = (tgt, src, "derived_from")
+                    if edge_key not in seen_edges:
+                        seen_edges.add(edge_key)
+                        edges.append(
+                            {
+                                "source": tgt,
+                                "target": src,
+                                "type": "derived_from",
+                            }
+                        )
+
+            return {"nodes": nodes, "edges": edges}
+        finally:
+            session.close()

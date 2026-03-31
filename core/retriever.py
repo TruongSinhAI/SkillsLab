@@ -581,10 +581,15 @@ class HybridRetriever:
             return []
         query_normalized = query_emb / query_norm
 
+        # Snapshot the cache under lock to avoid race conditions with
+        # concurrent writes from other threads (e.g. background warmup).
+        with self._cache_lock:
+            cache_snapshot = dict(self._embedding_cache)
+
         # Batch encode uncached skills
         uncached_skills: list[Skill] = []
         for skill in skills:
-            if skill.id not in self._embedding_cache:
+            if skill.id not in cache_snapshot:
                 uncached_skills.append(skill)
 
         if uncached_skills:
@@ -595,20 +600,24 @@ class HybridRetriever:
                 texts_to_encode.append(f"{desc} {' '.join(tags)}")
 
             embeddings = self._get_embeddings_batch(texts_to_encode)
+            new_embeddings: dict[str, np.ndarray] = {}
             for skill, emb in zip(uncached_skills, embeddings):
                 if emb is not None:
-                    with self._cache_lock:
-                        self._embedding_cache[skill.id] = emb
+                    new_embeddings[skill.id] = emb
+                    cache_snapshot[skill.id] = emb
 
-            # Persist new embeddings to disk
-            self._save_embedding_cache()
+            # Persist new embeddings to cache
+            if new_embeddings:
+                with self._cache_lock:
+                    self._embedding_cache.update(new_embeddings)
+                self._save_embedding_cache()
 
         # Compute cosine similarity against each skill embedding
         results: list[tuple[str, float]] = []
         for skill in skills:
-            if skill.id not in self._embedding_cache:
+            skill_emb = cache_snapshot.get(skill.id)
+            if skill_emb is None:
                 continue
-            skill_emb = self._embedding_cache[skill.id]
             skill_norm = np.linalg.norm(skill_emb)
             if skill_norm == 0:
                 continue

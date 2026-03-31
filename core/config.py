@@ -6,6 +6,7 @@ and .env file overrides. Provides sensible defaults for local development.
 """
 
 import os
+import threading
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -95,17 +96,21 @@ class SkillsLabConfig:
 
 # Global singleton — used by modules that don't receive config explicitly
 _config: Optional[SkillsLabConfig] = None
+_config_lock = threading.Lock()
 
 
 def get_config() -> SkillsLabConfig:
-    """Get the global configuration singleton, creating it if needed."""
+    """Get the global configuration singleton, creating it if needed (thread-safe)."""
     global _config
     if _config is None:
-        _config = SkillsLabConfig()
+        with _config_lock:
+            if _config is None:
+                _config = SkillsLabConfig()
     return _config
 
 
 def reset_config() -> None:
     """Reset the global config (useful for testing)."""
     global _config
-    _config = None
+    with _config_lock:
+        _config = None

@@ -453,6 +453,11 @@ class EvolutionEngine:
         if not source_skill_names:
             raise ValueError("At least one source skill is required.")
 
+        if not Skill.validate_name(target_skill_name):
+            raise ValueError(
+                f"Invalid target name '{target_skill_name}'. Must be kebab-case, 2-64 characters."
+            )
+
         sources: list[Skill] = []
         for sname in source_skill_names:
             s = self.session.query(Skill).filter_by(id=sname).first()

@@ -296,7 +296,7 @@ def get_references(name: str):
 
         mgr = _get_manager()
 
-        # --- Outgoing references (1 file read) ---
+        # --- Outgoing references (single file read) ---
         try:
             data = mgr.read_skill(name)
             raw_body = data.get("body", "")
@@ -314,39 +314,34 @@ def get_references(name: str):
 
         outgoing = sorted(bracket_refs | plain_refs)
 
-        # --- Incoming references (DB-based: check metadata.references column) ---
-        # Avoid O(N) file reads by using the DB-stored references field first,
-        # then only scan bodies of candidates for plain/bracket references.
+        # --- Incoming references (optimized single-pass) ---
+        # For each other skill, read SKILL.md ONCE (not twice) and extract
+        # both frontmatter references and body references in a single pass.
         incoming = []
-
-        # Strategy 1: Check metadata.references in other skills' frontmatter
         all_skills = session.query(Skill).all()
         for other in all_skills:
             if other.id == name:
                 continue
-            other_tags = other.get_tags()  # just to check references stored in DB
-            # Check if this skill's description or tags mention the target
-            # (lightweight DB-only check before expensive file reads)
-            other_refs = []
             try:
-                fm = mgr.read_frontmatter(other.id)
-                meta = fm.get("metadata", {}) or {}
-                other_refs = meta.get("references", [])
-                if isinstance(other_refs, list):
-                    if name in [str(r) for r in other_refs]:
-                        incoming.append(other.id)
-                        continue
-            except (FileNotFoundError, Exception):
-                pass
+                other_data = mgr.read_skill(other.id)
+                other_fm = other_data.get("frontmatter", {})
+                other_body = other_data.get("body", "")
 
-            # Strategy 2: Only if DB check didn't match, scan body for [[name]]
-            try:
-                other_body = mgr.read_body(other.id)
-                if f"[[{name}]]" in other_body:
-                    incoming.append(other.id)
-                elif re.search(r"\b" + re.escape(name) + r"\b", other_body, re.IGNORECASE):
-                    # Verify it's a genuine reference (at least 3 chars of context)
-                    incoming.append(other.id)
+                # Check metadata.references (fast string check)
+                found = False
+                meta = other_fm.get("metadata", {}) or {}
+                meta_refs = meta.get("references", [])
+                if isinstance(meta_refs, list):
+                    if name in [str(r) for r in meta_refs]:
+                        incoming.append(other.id)
+                        found = True
+
+                # Only scan body if metadata didn't match
+                if not found:
+                    if f"[[{name}]]" in other_body:
+                        incoming.append(other.id)
+                    elif re.search(r"\b" + re.escape(name) + r"\b", other_body, re.IGNORECASE):
+                        incoming.append(other.id)
             except (FileNotFoundError, Exception):
                 pass
 
@@ -357,19 +352,6 @@ def get_references(name: str):
         }
     finally:
         session.close()
-
-
-def bracket_refs_pattern_match(text: str, target: str) -> set:
-    """Check if text contains a [[target]] bracket reference."""
-    import re
-    matches = re.findall(r"\[\[([a-z0-9-]+)\]\]", text)
-    return set(matches)
-
-
-def plain_refs_match(text: str, target: str, all_skill_ids: set) -> bool:
-    """Check if text contains a plain reference to the target skill."""
-    import re
-    return bool(re.search(r"\b" + re.escape(target) + r"\b", text, re.IGNORECASE))
 
 
 @app.patch("/api/skills/{name}/deprecate")

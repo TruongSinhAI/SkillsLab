@@ -149,8 +149,8 @@ class SkillExporter:
                 body = ""
                 try:
                     body = self.manager.read_body(skill.id)
-                except (FileNotFoundError, Exception):
-                    pass  # body stays empty if SKILL.md is missing
+                except (FileNotFoundError, OSError, ValueError):
+                    pass  # body stays empty if SKILL.md is missing or unreadable
 
                 export = self._skill_to_export_dict(skill, body=body)
                 export["references"] = self._get_references(
@@ -193,7 +193,7 @@ class SkillExporter:
             body = ""
             try:
                 body = self.manager.read_body(skill.id)
-            except (FileNotFoundError, Exception):
+            except (FileNotFoundError, OSError, ValueError):
                 pass
 
             export = self._skill_to_export_dict(skill, body=body)

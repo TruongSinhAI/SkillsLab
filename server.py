@@ -375,19 +375,21 @@ async def save_skill(
         if action == "MERGE" and not source_skill_names:
             return "Error: action='MERGE' requires source_skill_names (comma-separated)."
 
-        session = get_session()
-        try:
-            engine = EvolutionEngine(
-                session=session,
-                manager=manager,
-                on_embedding_cache_clear=retriever.clear_cache,
-                on_embedding_compute=retriever.compute_and_cache_embedding,
-            )
+        ttl = int(ttl_days) if ttl_days and int(ttl_days) > 0 else None
 
-            ttl = int(ttl_days) if ttl_days and int(ttl_days) > 0 else None
+        # IMPORTANT: Session must be created AND used entirely within the worker
+        # thread. SQLAlchemy sessions are NOT thread-safe — creating the session
+        # in the async context and committing in a thread causes data corruption.
+        def _execute_evolution():
+            session = get_session()
+            try:
+                engine = EvolutionEngine(
+                    session=session,
+                    manager=manager,
+                    on_embedding_cache_clear=retriever.clear_cache,
+                    on_embedding_compute=retriever.compute_and_cache_embedding,
+                )
 
-            # Wrap the synchronous engine operations in a thread
-            def _execute_evolution():
                 if action == "ARCHIVE":
                     skill = engine.archive(
                         name=name,
@@ -442,50 +444,55 @@ async def save_skill(
                 session.commit()
                 return skill, action_desc
 
+            except ValueError as ve:
+                session.rollback()
+                raise ve
+            except Exception as e:
+                session.rollback()
+                raise e
+            finally:
+                session.close()
+
+        try:
             skill, action_desc = await asyncio.to_thread(_execute_evolution)
-
-            # Flush embedding cache to disk
-            retriever.flush_cache()
-
-            # Dedup check (after commit)
-            dup_warnings = ""
-            if action in ("ARCHIVE", "DERIVE"):
-                dups = retriever.check_duplicates(skill.id, skill.description)
-                if dups:
-                    dup_lines = [f"  - `{d['name']}` (similarity: {d['similarity']}) — {d['description'][:60]}" for d in dups[:3]]
-                    dup_warnings = f"\n\n⚠️ **Potential duplicates detected:**\n" + "\n".join(dup_lines)
-                    dup_warnings += "\nConsider MERGE if these skills are redundant."
-
-            result_msg = (
-                f"✅ {action_desc}\n\n"
-                f"- **Name:** `{skill.id}`\n"
-                f"- **Display:** {skill.display_name}\n"
-                f"- **Version:** V{skill.version_number}\n"
-                f"- **Type:** {skill.skill_type}\n"
-                f"- **Repo:** {skill.repo_name}\n"
-                f"- **Tags:** {', '.join(skill.get_tags())}\n"
-                f"- **Active:** {skill.is_active}\n"
-            )
-
-            if action in ("FIX", "DERIVE", "MERGE"):
-                result_msg += f"- **Parent(s):** {target_skill_name or source_skill_names}\n"
-                result_msg += f"- **Trigger:** {action}\n"
-                result_msg += f"- **Reason:** {reason}\n"
-
-            result_msg += dup_warnings
-
-            logger.info(f"save_skill({action}): {skill.id} V{skill.version_number}")
-            return result_msg
-
         except ValueError as ve:
-            session.rollback()
             return f"Error: {str(ve)}"
         except Exception as e:
-            session.rollback()
             logger.error(f"save_skill error: {e}", exc_info=True)
             return f"Error saving knowledge: {str(e)}"
-        finally:
-            session.close()
+
+        # Flush embedding cache to disk
+        retriever.flush_cache()
+
+        # Dedup check (after commit)
+        dup_warnings = ""
+        if action in ("ARCHIVE", "DERIVE"):
+            dups = retriever.check_duplicates(skill.id, skill.description)
+            if dups:
+                dup_lines = [f"  - `{d['name']}` (similarity: {d['similarity']}) — {d['description'][:60]}" for d in dups[:3]]
+                dup_warnings = f"\n\n⚠️ **Potential duplicates detected:**\n" + "\n".join(dup_lines)
+                dup_warnings += "\nConsider MERGE if these skills are redundant."
+
+        result_msg = (
+            f"✅ {action_desc}\n\n"
+            f"- **Name:** `{skill.id}`\n"
+            f"- **Display:** {skill.display_name}\n"
+            f"- **Version:** V{skill.version_number}\n"
+            f"- **Type:** {skill.skill_type}\n"
+            f"- **Repo:** {skill.repo_name}\n"
+            f"- **Tags:** {', '.join(skill.get_tags())}\n"
+            f"- **Active:** {skill.is_active}\n"
+        )
+
+        if action in ("FIX", "DERIVE", "MERGE"):
+            result_msg += f"- **Parent(s):** {target_skill_name or source_skill_names}\n"
+            result_msg += f"- **Trigger:** {action}\n"
+            result_msg += f"- **Reason:** {reason}\n"
+
+        result_msg += dup_warnings
+
+        logger.info(f"save_skill({action}): {skill.id} V{skill.version_number}")
+        return result_msg
 
     except Exception as e:
         logger.error(f"save_skill outer error: {e}", exc_info=True)
