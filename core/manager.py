@@ -676,6 +676,8 @@ class SKILLManager:
         Returns: ``name + description + tags + repo + body`` (body truncated to
         2000 characters to avoid excessive tokenization).
 
+        Performance: reads the SKILL.md file at most once (single read_skill call).
+
         Falls back gracefully to metadata-only text if the body cannot be read.
 
         Args:
@@ -686,7 +688,10 @@ class SKILLManager:
             skill body text for full-text search coverage.
         """
         try:
-            fm = self.read_frontmatter(skill_name)
+            data = self.read_skill(skill_name)  # Single file read
+            fm = data["frontmatter"]
+            body = data.get("body", "")
+
             name = fm.get("name", skill_name)
             desc = fm.get("description", "")
             repo: str = ""
@@ -697,13 +702,6 @@ class SKILLManager:
                 tags = meta.get("tags", [])
                 if isinstance(tags, list):
                     tags = [str(t) for t in tags]
-
-            # Attempt to read the body for full-text indexing
-            body = ""
-            try:
-                body = self.read_body(skill_name)
-            except Exception:
-                pass
 
             # Truncate body to 2000 chars to avoid excessive tokenization
             if len(body) > 2000:

@@ -31,16 +31,22 @@ Endpoints:
   GET  /                        — Serve React UI
 """
 
+import logging
 import os
+import threading
+import time
 from datetime import datetime, timezone
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sqlalchemy import func
 
 from core.analytics import SkillsAnalytics
 from core.models import init_db, get_session, Skill, SkillChangelog, SkillType
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Init
@@ -61,24 +67,47 @@ from core.retriever import HybridRetriever
 
 _mgr: SKILLManager | None = None
 _ret: HybridRetriever | None = None
+_singleton_lock = threading.Lock()
+_singleton_ready = False
 
 
 def _get_manager() -> SKILLManager:
-    """Lazily create the SKILLManager singleton."""
+    """Lazily create the SKILLManager singleton (thread-safe)."""
     global _mgr
     if _mgr is None:
-        _mgr = SKILLManager(WORKSPACE_PATH)
+        with _singleton_lock:
+            if _mgr is None:
+                _mgr = SKILLManager(WORKSPACE_PATH)
+                logger.info("SKILLManager singleton created")
     return _mgr
 
 
 def _get_retriever() -> HybridRetriever:
-    """Lazily create the HybridRetriever singleton."""
-    global _ret
+    """Lazily create the HybridRetriever singleton (thread-safe)."""
+    global _ret, _singleton_ready
     if _ret is None:
-        _ret = HybridRetriever(session_factory=get_session, manager=_get_manager(), workspace_path=WORKSPACE_PATH)
+        with _singleton_lock:
+            if _ret is None:
+                t0 = time.time()
+                _ret = HybridRetriever(
+                    session_factory=get_session,
+                    manager=_get_manager(),
+                    workspace_path=WORKSPACE_PATH,
+                )
+                _singleton_ready = True
+                logger.info(f"HybridRetriever singleton created ({time.time() - t0:.2f}s)")
     return _ret
 
 app = FastAPI(title="Skills Lab Dashboard", version="2.1 (SKILL.md Standard)")
+
+# CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # ---------------------------------------------------------------------------
 # Pydantic models
@@ -159,16 +188,26 @@ def list_skills(
 
         skills = query.order_by(Skill.last_used_at.desc().nullslast(), Skill.created_at.desc()).all()
 
-        # Enrich with changelog count
+        # Enrich with changelog count — use single batch query instead of N+1
+        all_skill_ids = [s.id for s in skills]
+        changelog_counts = {}
+        if all_skill_ids:
+            count_rows = (
+                session.query(
+                    SkillChangelog.skill_id,
+                    func.count(SkillChangelog.id),
+                )
+                .filter(SkillChangelog.skill_id.in_(all_skill_ids))
+                .group_by(SkillChangelog.skill_id)
+                .all()
+            )
+            changelog_counts = dict(count_rows)
+
         result = []
         for skill in skills:
-            changelog_count = session.query(SkillChangelog).filter(
-                SkillChangelog.skill_id == skill.id
-            ).count()
-
             result.append({
                 **skill.to_dict(),
-                "lineage_count": changelog_count,
+                "lineage_count": changelog_counts.get(skill.id, 0),
             })
 
         return result
@@ -583,19 +622,25 @@ def search_skills(request: SearchRequest):
             tags_filter=tags,
         )
 
-        # Ensure results are serializable
+        # CRITICAL FIX: Properly serialize Skill objects to dicts.
+        # Raw SQLAlchemy objects cause jsonable_encoder to traverse lazy
+        # relationships (e.g. changelog), which triggers DB queries on closed
+        # sessions → request hangs indefinitely.
         serializable = []
         for r in results:
-            item = {}
             if isinstance(r, dict):
-                item = r
-            elif hasattr(r, 'to_dict'):
-                item = r.to_dict()
-            elif hasattr(r, '__dict__'):
-                item = r.__dict__
+                skill_obj = r.get("skill")
+                if skill_obj is not None and hasattr(skill_obj, "to_dict"):
+                    serializable.append({
+                        "skill": skill_obj.to_dict(),
+                        "rrf_score": r.get("rrf_score", 0),
+                    })
+                else:
+                    serializable.append(r)
+            elif hasattr(r, "to_dict"):
+                serializable.append(r.to_dict())
             else:
-                item = {"result": str(r)}
-            serializable.append(item)
+                serializable.append({"result": str(r)})
 
         return {
             "query": request.query.strip(),
@@ -603,6 +648,7 @@ def search_skills(request: SearchRequest):
             "results": serializable,
         }
     except Exception as e:
+        logger.error(f"Search failed: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Search failed: {str(e)}")
 
 

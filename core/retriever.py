@@ -417,6 +417,8 @@ class HybridRetriever:
         Falls back to metadata-only indexing if the manager is unavailable or
         body read fails.
 
+        Performance: reads each SKILL.md file at most once per skill.
+
         Args:
             skills: The list of active Skill ORM objects to index.
         """
@@ -426,6 +428,7 @@ class HybridRetriever:
                 self._bm25_skill_ids = []
                 return
 
+            t0 = time.time()
             corpus_tokens: list[list[str]] = []
             skill_ids: list[str] = []
             for skill in skills:
@@ -449,7 +452,8 @@ class HybridRetriever:
             self._bm25_index = BM25Okapi(corpus_tokens)
             self._bm25_skill_ids = skill_ids
             self._bm25_dirty = False
-            logger.debug(f"BM25 index rebuilt: {len(skill_ids)} skills (with body text)")
+            elapsed = time.time() - t0
+            logger.info(f"BM25 index rebuilt: {len(skill_ids)} skills in {elapsed:.3f}s")
 
     def _get_or_build_bm25(self, skills: list[Skill]) -> tuple:
         """

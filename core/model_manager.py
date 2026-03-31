@@ -32,10 +32,13 @@ def is_model_cached(model_name: str, workspace_path: str = "") -> bool:
     """
     Check whether an embedding model is already cached locally.
 
-    Checks three locations:
-      1. HuggingFace hub cache (``~/.cache/huggingface/hub/``)
-      2. Sentence-transformers cache (``~/.cache/torch/sentence_transformers/``)
-      3. Workspace local cache (``<workspace_path>/.cache/models/``)
+    Checks three locations (short-circuits on first match):
+      1. Workspace local cache (fastest — local directory check)
+      2. Sentence-transformers cache
+      3. HuggingFace hub cache
+
+    Performance: checks local workspace first (O(1)), then falls back
+    to scanning HuggingFace cache directories only if needed.
 
     Args:
         model_name: The HuggingFace model identifier (e.g. ``BAAI/bge-small-en-v1.5``).
@@ -47,27 +50,41 @@ def is_model_cached(model_name: str, workspace_path: str = "") -> bool:
     # Normalise the model name for filesystem matching
     safe_name = model_name.replace("/", "--").lower()
 
-    # 1. HuggingFace hub cache
-    hf_cache = os.path.expanduser("~/.cache/huggingface/hub")
-    if os.path.isdir(hf_cache):
-        for entry in os.listdir(hf_cache):
-            if safe_name in entry.lower():
-                snapshot_dir = os.path.join(hf_cache, entry, "snapshots")
-                if os.path.isdir(snapshot_dir) and os.listdir(snapshot_dir):
-                    return True
-
-    # 2. Sentence-transformers cache (older versions)
-    st_cache = os.path.expanduser("~/.cache/torch/sentence_transformers")
-    if os.path.isdir(st_cache):
-        for entry in os.listdir(st_cache):
-            if safe_name in entry.lower() or model_name.lower() in entry.lower():
-                return True
-
-    # 3. Workspace local cache
+    # 0. Quick check: workspace local cache (fastest — no directory scanning)
     if workspace_path:
         local_cache = os.path.join(workspace_path, ".cache", "models", safe_name)
-        if os.path.isdir(local_cache) and os.listdir(local_cache):
-            return True
+        if os.path.isdir(local_cache):
+            try:
+                if any(os.scandir(local_cache)):
+                    return True
+            except OSError:
+                pass
+
+    # 1. Sentence-transformers cache (smaller, check first)
+    st_cache = os.path.expanduser("~/.cache/torch/sentence_transformers")
+    if os.path.isdir(st_cache):
+        try:
+            for entry in os.scandir(st_cache):
+                if safe_name in entry.name.lower() or model_name.lower() in entry.name.lower():
+                    return True
+        except OSError:
+            pass
+
+    # 2. HuggingFace hub cache (can be very large — scan last)
+    hf_cache = os.path.expanduser("~/.cache/huggingface/hub")
+    if os.path.isdir(hf_cache):
+        try:
+            for entry in os.scandir(hf_cache):
+                if safe_name in entry.name.lower():
+                    snapshot_dir = os.path.join(hf_cache, entry.name, "snapshots")
+                    if os.path.isdir(snapshot_dir):
+                        try:
+                            if any(os.scandir(snapshot_dir)):
+                                return True
+                        except OSError:
+                            pass
+        except OSError:
+            pass
 
     return False
 

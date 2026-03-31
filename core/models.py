@@ -343,16 +343,21 @@ def init_db(workspace_path: str) -> None:
         os.makedirs(workspace_path, exist_ok=True)
         db_path = os.path.join(workspace_path, "brain.db")
         db_url = f"sqlite:///{db_path}"
-        _engine = create_engine(db_url, echo=False)
+        _engine = create_engine(
+            db_url,
+            echo=False,
+            connect_args={"timeout": 30},  # Wait up to 30s for write locks
+        )
 
         from sqlalchemy import event
 
         @event.listens_for(_engine, "connect")
         def set_wal_mode(dbapi_connection, connection_record):
-            """Enable WAL journal mode on every new SQLite connection."""
+            """Enable WAL journal mode and set busy timeout on every new SQLite connection."""
             cursor = dbapi_connection.cursor()
             cursor.execute("PRAGMA journal_mode=WAL")
             cursor.execute("PRAGMA synchronous=NORMAL")
+            cursor.execute("PRAGMA busy_timeout=30000")  # 30 second busy timeout
             cursor.close()
 
         Base.metadata.create_all(_engine)
