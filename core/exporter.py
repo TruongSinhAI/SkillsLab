@@ -21,7 +21,7 @@ Usage (CLI)::
 import json
 import os
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Callable, Optional
 
 from core.manager import SKILLManager
 from core.models import Skill, get_session, init_db
@@ -52,7 +52,31 @@ class SkillExporter:
         """
         self.workspace_path: str = workspace_path
         self.manager: SKILLManager = SKILLManager(workspace_path)
+        self._on_cache_clear: Optional[Callable] = None
+        self._on_cache_compute: Optional[Callable] = None
+        self._on_cache_flush: Optional[Callable] = None
         init_db(workspace_path)
+
+    def set_cache_callbacks(
+        self,
+        on_cache_clear: Optional[Callable] = None,
+        on_cache_compute: Optional[Callable] = None,
+        on_cache_flush: Optional[Callable] = None,
+    ) -> None:
+        """Register callbacks for embedding cache operations during import.
+
+        Callers that have access to a ``HybridRetriever`` can pass its methods
+        here so that imported skills get proper embeddings and the BM25 index
+        is invalidated.
+
+        Args:
+            on_cache_clear: ``retriever.clear_cache`` — evict a skill from cache.
+            on_cache_compute: ``retriever.compute_and_cache_embedding`` — compute embedding.
+            on_cache_flush: ``retriever.flush_cache`` — persist cache to disk.
+        """
+        self._on_cache_clear = on_cache_clear
+        self._on_cache_compute = on_cache_compute
+        self._on_cache_flush = on_cache_flush
 
     # ------------------------------------------------------------------
     # Public helpers
@@ -323,7 +347,12 @@ class SkillExporter:
                 session.flush()
 
             mgr = self.manager
-            engine = EvolutionEngine(session=session, manager=mgr)
+            engine = EvolutionEngine(
+                session=session,
+                manager=mgr,
+                on_embedding_cache_clear=self._on_cache_clear,
+                on_embedding_compute=self._on_cache_compute,
+            )
 
             engine.archive(
                 name=name,
@@ -336,6 +365,11 @@ class SkillExporter:
             )
 
             session.commit()
+
+            # Flush embedding cache to disk if callback is registered
+            if self._on_cache_flush:
+                self._on_cache_flush()
+
             return True
         except Exception:
             session.rollback()
@@ -354,6 +388,7 @@ class SkillExporter:
         skill_type: str | None = None,
         tags: list[str] | None = None,
         limit: int = 20,
+        include_body: bool = False,
     ) -> list[dict[str, Any]]:
         """Search skills by text query, repo, type, or tags.
 
@@ -366,6 +401,9 @@ class SkillExporter:
             skill_type: Filter by ``skill_type``.
             tags: Filter skills that have at least one of the given tags.
             limit: Maximum number of results to return.
+            include_body: If True, read and include the SKILL.md body for
+                each result (default False for performance — avoids O(N)
+                file reads).
 
         Returns:
             A list of skill export dicts matching the criteria.
@@ -401,10 +439,11 @@ class SkillExporter:
                         continue
 
                 body = ""
-                try:
-                    body = self.manager.read_body(skill.id)
-                except Exception:
-                    pass
+                if include_body:
+                    try:
+                        body = self.manager.read_body(skill.id)
+                    except (FileNotFoundError, OSError, ValueError):
+                        pass
 
                 out.append(self._skill_to_export_dict(skill, body=body))
 

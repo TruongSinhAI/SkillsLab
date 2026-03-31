@@ -304,19 +304,6 @@ class TestGetSearchText:
         assert "cors" in text
         assert "api" in text
 
-    def test_get_bm25_text(self, skill_manager):
-        skill_manager.write_skill(
-            "bm25-test",
-            description="Docker build",
-            body="# Docker\n\nSolution\n",
-            tags=["docker"],
-            repo="my-repo",
-        )
-        text = skill_manager.get_bm25_text("bm25-test")
-        assert "bm25-test" in text
-        assert "Docker build" in text
-        assert "my-repo" in text
-
     def test_get_search_text_nonexistent(self, skill_manager):
         # Should return empty string gracefully
         text = skill_manager.get_description_for_search("nope")

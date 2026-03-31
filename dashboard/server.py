@@ -298,57 +298,32 @@ def get_references(name: str):
 
         # --- Outgoing references (single file read) ---
         try:
-            data = mgr.read_skill(name)
-            raw_body = data.get("body", "")
-        except FileNotFoundError:
-            raw_body = ""
+            outgoing = mgr.get_references(name)
+        except (FileNotFoundError, Exception):
+            outgoing = []
 
-        all_skill_ids = {s.id for s in session.query(Skill.id).all()}
-
-        bracket_refs = set(re.findall(r"\[\[([a-z0-9-]+)\]\]", raw_body))
-
-        plain_refs = set()
-        for sid in all_skill_ids:
-            if sid != name and re.search(r"\b" + re.escape(sid) + r"\b", raw_body, re.IGNORECASE):
-                plain_refs.add(sid)
-
-        outgoing = sorted(bracket_refs | plain_refs)
-
-        # --- Incoming references (optimized single-pass) ---
-        # For each other skill, read SKILL.md ONCE (not twice) and extract
-        # both frontmatter references and body references in a single pass.
-        incoming = []
+        # --- Incoming references: single-pass ref_map ---
+        # Build a ref_map: skill_id → set of referenced skill_ids in one pass.
+        # Then build reverse map and look up incoming for target.
+        ref_map: dict[str, set[str]] = {}
         all_skills = session.query(Skill).all()
         for other in all_skills:
             if other.id == name:
                 continue
             try:
-                other_data = mgr.read_skill(other.id)
-                other_fm = other_data.get("frontmatter", {})
-                other_body = other_data.get("body", "")
-
-                # Check metadata.references (fast string check)
-                found = False
-                meta = other_fm.get("metadata", {}) or {}
-                meta_refs = meta.get("references", [])
-                if isinstance(meta_refs, list):
-                    if name in [str(r) for r in meta_refs]:
-                        incoming.append(other.id)
-                        found = True
-
-                # Only scan body if metadata didn't match
-                if not found:
-                    if f"[[{name}]]" in other_body:
-                        incoming.append(other.id)
-                    elif re.search(r"\b" + re.escape(name) + r"\b", other_body, re.IGNORECASE):
-                        incoming.append(other.id)
+                refs = mgr.get_references(other.id)
+                ref_map[other.id] = set(refs)
             except (FileNotFoundError, Exception):
-                pass
+                ref_map[other.id] = set()
+
+        incoming = sorted(
+            sid for sid, refs in ref_map.items() if name in refs
+        )
 
         return {
             "skill_name": name,
             "outgoing_references": outgoing,
-            "incoming_references": sorted(incoming),
+            "incoming_references": incoming,
         }
     finally:
         session.close()
