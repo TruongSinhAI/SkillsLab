@@ -321,6 +321,7 @@ _engine = None
 _session_factory = None
 _scoped_factory = None
 _db_lock = threading.Lock()
+_initialized_workspace: str | None = None
 
 
 def init_db(workspace_path: str) -> None:
@@ -332,14 +333,29 @@ def init_db(workspace_path: str) -> None:
     prepares both a regular and a scoped session factory.
 
     This function is idempotent — calling it multiple times is safe thanks
-    to the internal threading lock.
+    to the internal threading lock. If called with a different workspace_path
+    than a previous call, a warning is logged but the engine is still
+    re-initialized (last caller wins).
 
     Args:
         workspace_path: Absolute or relative path to the workspace directory
                         that will contain ``brain.db``.
     """
-    global _engine, _session_factory, _scoped_factory
+    global _engine, _session_factory, _scoped_factory, _initialized_workspace
+
+    # Normalize workspace path for comparison
+    normalized = os.path.abspath(workspace_path)
+
     with _db_lock:
+        if _initialized_workspace and _initialized_workspace != normalized:
+            import logging
+            logging.getLogger(__name__).warning(
+                f"init_db() called with different workspace path: "
+                f"'{_initialized_workspace}' → '{normalized}'. "
+                f"Re-initializing database engine (connections to the old "
+                f"database may be stale)."
+            )
+
         os.makedirs(workspace_path, exist_ok=True)
         db_path = os.path.join(workspace_path, "brain.db")
         db_url = f"sqlite:///{db_path}"
@@ -366,6 +382,7 @@ def init_db(workspace_path: str) -> None:
 
         _session_factory = sessionmaker(bind=_engine)
         _scoped_factory = scoped_session(_session_factory)
+        _initialized_workspace = normalized
 
 
 def get_session() -> Session:

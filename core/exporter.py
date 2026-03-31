@@ -422,9 +422,11 @@ class SkillExporter:
 
             if query:
                 q_lower = query.lower()
+                # Escape LIKE wildcards to prevent unintended pattern matching
+                safe = q_lower.replace("%", r"\%").replace("_", r"\_")
                 results = results.filter(
-                    (Skill.id.ilike(f"%{q_lower}%"))
-                    | (Skill.description.ilike(f"%{q_lower}%"))
+                    (Skill.id.ilike(f"%{safe}%"))
+                    | (Skill.description.ilike(f"%{safe}%"))
                 )
 
             results = results.order_by(Skill.use_count.desc()).limit(limit)

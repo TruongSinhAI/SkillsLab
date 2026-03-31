@@ -97,13 +97,24 @@ def cmd_init(args):
     from core.models import init_db, get_session
     from core.manager import SKILLManager
     from core.evolver import EvolutionEngine
+    from core.retriever import HybridRetriever
 
     workspace = _get_workspace()
 
     init_db(workspace)
     mgr = SKILLManager(workspace)
     session = get_session()
-    engine = EvolutionEngine(session=session, manager=mgr)
+    ret = HybridRetriever(
+        session_factory=get_session,
+        manager=mgr,
+        workspace_path=workspace,
+    )
+    engine = EvolutionEngine(
+        session=session,
+        manager=mgr,
+        on_embedding_cache_clear=ret.clear_cache,
+        on_embedding_compute=ret.compute_and_cache_embedding,
+    )
 
     # Sample skills
     samples = [
@@ -285,13 +296,24 @@ def cmd_sync(args):
     from core.models import init_db, get_session, Skill, SkillType
     from core.manager import SKILLManager
     from core.evolver import EvolutionEngine
+    from core.retriever import HybridRetriever
 
     workspace = _get_workspace()
 
     init_db(workspace)
     mgr = SKILLManager(workspace)
     session = get_session()
-    engine = EvolutionEngine(session=session, manager=mgr)
+    ret = HybridRetriever(
+        session_factory=get_session,
+        manager=mgr,
+        workspace_path=workspace,
+    )
+    engine = EvolutionEngine(
+        session=session,
+        manager=mgr,
+        on_embedding_cache_clear=ret.clear_cache,
+        on_embedding_compute=ret.compute_and_cache_embedding,
+    )
 
     # Find all SKILL.md files
     skill_names = mgr.list_skills()

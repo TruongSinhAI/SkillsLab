@@ -179,7 +179,9 @@ def list_skills(
             query = query.filter(Skill.skill_type == skill_type)
 
         if search:
-            like = f"%{search}%"
+            # Escape LIKE wildcards to prevent unintended pattern matching
+            safe = search.replace("%", r"\%").replace("_", r"\_")
+            like = f"%{safe}%"
             query = query.filter(
                 (Skill.id.ilike(like)) |
                 (Skill.display_name.ilike(like)) |
