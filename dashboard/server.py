@@ -344,8 +344,10 @@ def deprecate_skill(name: str, req: DeprecateRequest):
         skill.last_modified_at = datetime.now(timezone.utc)
         session.commit()
 
-        # Invalidate BM25 index (active skill list changed)
-        _get_retriever().invalidate_all()
+        # Invalidate BM25 index (active skill list changed) and clear embedding
+        # for the deactivated skill only (no need to clear all embeddings)
+        ret = _get_retriever()
+        ret.clear_cache(name)  # Clears embedding + marks BM25 dirty
 
         return {"status": "deprecated", "name": name, "reason": req.reason}
     except HTTPException:
@@ -366,7 +368,7 @@ def extend_ttl(name: str, req: ExtendTTLRequest):
         if not skill:
             raise HTTPException(status_code=404, detail=f"Skill '{name}' not found")
 
-        skill.ttl_days = (skill.ttl_days or 0) + req.additional_days
+        skill.ttl_days = (skill.ttl_days or 0) + max(req.additional_days, 1)
         skill.compute_expires_at()
         skill.last_modified_at = datetime.now(timezone.utc)
         session.commit()

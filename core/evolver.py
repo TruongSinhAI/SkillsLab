@@ -603,7 +603,7 @@ class EvolutionEngine:
             skill_name=target_skill_name,
             description=target.description,
             body=new_body,
-            display_name=display_name,
+            display_name=target.display_name,
             skill_type=target.skill_type,
             repo=target.repo_name,
             version=new_version,

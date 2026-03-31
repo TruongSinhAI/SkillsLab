@@ -478,19 +478,31 @@ class HybridRetriever:
         stale index for the current search (stale-while-revalidate pattern).
         On the very first build (no index at all), falls back to inline build.
 
+        Thread-safe: uses ``_bm25_lock`` to prevent multiple concurrent background
+        rebuilds from being spawned.
+
         Args:
             skills: The full list of active Skill objects (used for rebuild).
 
         Returns:
             A tuple of ``(BM25Okapi index, list_of_skill_ids)``.
         """
-        if self._bm25_dirty or self._bm25_index is None:
-            # If we have an existing index, use it while rebuilding in background
-            if self._bm25_index is not None:
-                self._rebuild_bm25_async(skills)
-            else:
-                # First time — must build synchronously
-                self._rebuild_bm25_index(skills)
+        with self._bm25_lock:
+            needs_rebuild = self._bm25_dirty or self._bm25_index is None
+            if not needs_rebuild:
+                return self._bm25_index, self._bm25_skill_ids
+
+            has_existing = self._bm25_index is not None
+            # Clear dirty flag immediately under lock to prevent duplicate spawns
+            self._bm25_dirty = False
+
+        if has_existing:
+            # We have an existing index — use it while rebuilding in background
+            self._rebuild_bm25_async(skills)
+        else:
+            # First time — must build synchronously
+            self._rebuild_bm25_index(skills)
+
         return self._bm25_index, self._bm25_skill_ids
 
     def _rebuild_bm25_async(self, skills: list[Skill]) -> None:
