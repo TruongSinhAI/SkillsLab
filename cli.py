@@ -262,8 +262,13 @@ docs(readme): update installation instructions
         except ValueError:
             print(f"  [skip] '{sample['name']}' already exists, skipping")
 
-    session.commit()
-    session.close()
+    try:
+        session.commit()
+    except Exception as e:
+        print(f"  [err] Failed to commit: {e}")
+        session.rollback()
+    finally:
+        session.close()
 
     print(f"\n  Skills Lab initialized!")
     print(f"   Workspace:  {workspace}")
@@ -377,11 +382,16 @@ def cmd_sync(args):
             errors += 1
             print(f"  [err] {name} - error: {e}")
 
-    session.commit()
-    session.close()
-
     print(f"\n  Sync complete!")
-    print(f"   Imported: {imported}")
+    try:
+        session.commit()
+    except Exception as e:
+        print(f"  [err] Failed to commit: {e}")
+        session.rollback()
+    finally:
+        session.close()
+
+    print(f"\n  Imported: {imported}")
     print(f"   Skipped (already in DB): {skipped}")
     print(f"   Errors: {errors}")
 

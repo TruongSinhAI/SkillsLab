@@ -356,6 +356,13 @@ def init_db(workspace_path: str) -> None:
                 f"database may be stale)."
             )
 
+        # Dispose existing engine connections before re-creating
+        if _engine is not None:
+            try:
+                _engine.dispose()
+            except Exception:
+                pass
+
         os.makedirs(workspace_path, exist_ok=True)
         db_path = os.path.join(workspace_path, "brain.db")
         db_url = f"sqlite:///{db_path}"

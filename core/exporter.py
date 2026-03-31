@@ -24,7 +24,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Optional
 
 from core.manager import SKILLManager
-from core.models import Skill, get_session, init_db
+from core.models import Skill, SkillChangelog, get_session, init_db
 
 
 class SkillExporter:
@@ -342,7 +342,10 @@ class SkillExporter:
                     return False
                 if not overwrite:
                     return False
-                # Delete the existing skill so we can re-create it
+                # Delete the existing skill AND its changelog entries to avoid orphans
+                session.query(SkillChangelog).filter(
+                    SkillChangelog.skill_id == name
+                ).delete()
                 session.delete(existing)
                 session.flush()
 

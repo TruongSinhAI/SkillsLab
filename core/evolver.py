@@ -149,6 +149,13 @@ class EvolutionEngine:
                 f"Invalid name '{name}'. Must be kebab-case, 2-64 characters."
             )
 
+        # Validate skill_type against known enum values
+        valid_types = {t.value for t in SkillType}
+        if skill_type not in valid_types:
+            raise ValueError(
+                f"Invalid skill_type '{skill_type}'. Must be one of: {', '.join(sorted(valid_types))}"
+            )
+
         existing = self.session.query(Skill).filter_by(id=name).first()
         if existing:
             raise ValueError(
@@ -248,6 +255,10 @@ class EvolutionEngine:
             raise ValueError(f"Skill does not exist: {target_skill_name}")
         if not skill.is_active:
             raise ValueError(f"Skill '{target_skill_name}' is already inactive.")
+        if not lesson or not lesson.strip():
+            raise ValueError(
+                f"Lesson is required and cannot be empty for FIX on '{target_skill_name}'."
+            )
         if not self.manager.skill_dir_exists(target_skill_name):
             raise ValueError(
                 f"Skill '{target_skill_name}' exists in DB but its SKILL.md file "
@@ -350,6 +361,11 @@ class EvolutionEngine:
         )
         if not parent:
             raise ValueError(f"Skill does not exist: {target_skill_name}")
+        if not parent.is_active:
+            raise ValueError(
+                f"Cannot derive from inactive skill '{target_skill_name}'. "
+                f"Reactivate it first or use ARCHIVE to create a new skill."
+            )
         if not Skill.validate_name(new_name):
             raise ValueError(f"Invalid name '{new_name}'.")
         if self.session.query(Skill).filter_by(id=new_name).first():
@@ -494,13 +510,6 @@ class EvolutionEngine:
             except FileNotFoundError:
                 pass
 
-        new_body = self._ensure_lessons_section(new_body, 1)
-        if all_lessons and LESSONS_HEADING in new_body:
-            lessons_text = "\n".join(all_lessons)
-            new_body = new_body.replace(
-                LESSONS_HEADING, f"{LESSONS_HEADING}\n{lessons_text}", 1
-            )
-
         # Merge tags from all sources
         merged_tags: set[str] = set(tags) if tags else set()
         for src in sources:
@@ -508,7 +517,6 @@ class EvolutionEngine:
         merged_tags = sorted(merged_tags)
 
         max_ver = max(s.version_number for s in sources)
-        new_version = max_ver + 1
 
         # Check whether the target already exists
         target = (
@@ -516,8 +524,12 @@ class EvolutionEngine:
         )
 
         if target:
-            # Update existing target
-            # Also collect the target's existing lessons to preserve them
+            # FIX: Ensure version never goes backwards — take the higher of
+            # (max source version + 1) vs (existing target version + 1)
+            new_version = max(max_ver + 1, target.version_number + 1)
+
+            # FIX: Collect target's existing lessons BEFORE assembling new_body
+            # so they are included in the merged output
             try:
                 target_body = self.manager.read_body(target_skill_name)
                 if LESSONS_HEADING in target_body:
@@ -541,8 +553,26 @@ class EvolutionEngine:
                 EvolutionTrigger.MERGE.value,
                 reason,
             )
+
+            # Assemble new body with all collected lessons (target + sources)
+            new_body = self._ensure_lessons_section(new_body, new_version)
+            if all_lessons and LESSONS_HEADING in new_body:
+                lessons_text = "\n".join(all_lessons)
+                new_body = new_body.replace(
+                    LESSONS_HEADING, f"{LESSONS_HEADING}\n{lessons_text}", 1
+                )
         else:
             # Create a brand-new target skill
+            new_version = max_ver + 1
+
+            # Assemble new body with lessons (no target lessons yet — it's new)
+            new_body = self._ensure_lessons_section(new_body, new_version)
+            if all_lessons and LESSONS_HEADING in new_body:
+                lessons_text = "\n".join(all_lessons)
+                new_body = new_body.replace(
+                    LESSONS_HEADING, f"{LESSONS_HEADING}\n{lessons_text}", 1
+                )
+
             target = Skill(
                 id=target_skill_name,
                 display_name=display_name,
@@ -582,11 +612,20 @@ class EvolutionEngine:
         )
 
         # Deactivate all source skills (except the target itself)
+        # Write changelog entries for deactivated sources so lineage is preserved
         for src in sources:
             if src.id != target_skill_name:
                 src.is_active = False
                 src.last_modified_at = now
                 self._clear_cache(src.id)
+                self._add_changelog(
+                    src.id,
+                    src.version_number,
+                    src.version_number,
+                    EvolutionTrigger.MERGE.value,
+                    f"Merged into '{target_skill_name}' V{new_version}: {reason}",
+                    source_id=target_skill_name,
+                )
 
         self.session.flush()
 

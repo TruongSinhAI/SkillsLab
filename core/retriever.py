@@ -911,14 +911,37 @@ class HybridRetriever:
             session.close()
 
         duplicates: list[dict] = []
+        # Snapshot cache under lock to avoid race with concurrent writes
+        with self._cache_lock:
+            cache_snapshot = dict(self._embedding_cache)
+
+        # Batch encode uncached skills and persist them for future dedup checks
+        uncached_skills: list[Skill] = []
         for skill in skills:
-            if skill.id in self._embedding_cache:
-                emb = self._embedding_cache[skill.id]
-            else:
-                text = f"{skill.description} {' '.join(skill.get_tags())}"
-                emb = self._get_embedding(text)
-                if emb is None:
-                    continue
+            if skill.id not in cache_snapshot:
+                uncached_skills.append(skill)
+
+        if uncached_skills:
+            texts_to_encode = [
+                f"{s.description} {' '.join(s.get_tags())}" for s in uncached_skills
+            ]
+            embeddings = self._get_embeddings_batch(texts_to_encode)
+            new_embeddings: dict[str, np.ndarray] = {}
+            for skill, emb in zip(uncached_skills, embeddings):
+                if emb is not None:
+                    new_embeddings[skill.id] = emb
+                    cache_snapshot[skill.id] = emb
+
+            # Persist new embeddings to cache
+            if new_embeddings:
+                with self._cache_lock:
+                    self._embedding_cache.update(new_embeddings)
+                self._save_embedding_cache()
+
+        for skill in skills:
+            emb = cache_snapshot.get(skill.id)
+            if emb is None:
+                continue
 
             emb_norm = np.linalg.norm(emb)
             if emb_norm == 0:
