@@ -28,7 +28,7 @@ DEFAULT_MODEL = "BAAI/bge-small-en-v1.5"
 FALLBACK_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 
 # Backend priority: onnxruntime (CPU-only) > torch (CPU+GPU)
-_BACKEND_PRIORITY = ["onnx", "torch"]
+_BACKEND_PRIORITY = ["onnxruntime", "torch"]
 
 
 # ---------------------------------------------------------------------------
@@ -45,14 +45,14 @@ def detect_backend() -> str:
       2. torch — heavier, but supports GPU acceleration
 
     Returns:
-        ``"onnx"`` if onnxruntime (and tokenizers) are importable,
+        ``"onnxruntime"`` if onnxruntime (and tokenizers) are importable,
         ``"torch"`` if only torch is available,
         or an empty string if neither is available.
     """
     for backend in _BACKEND_PRIORITY:
         try:
             if importlib.util.find_spec(backend) is not None:
-                if backend == "onnx":
+                if backend == "onnxruntime":
                     # ONNX path also needs tokenizers and huggingface_hub
                     if importlib.util.find_spec("tokenizers") is None:
                         logger.debug("ONNX backend: tokenizers not installed")
