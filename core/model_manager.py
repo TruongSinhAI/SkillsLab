@@ -27,8 +27,8 @@ logger = logging.getLogger(__name__)
 DEFAULT_MODEL = "BAAI/bge-small-en-v1.5"
 FALLBACK_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 
-# Backend priority: onnxruntime (CPU-only) > torch (CPU+GPU)
-_BACKEND_PRIORITY = ["onnxruntime", "torch"]
+# Backend priority: onnxruntime (best) > torch (GPU) > numpy (always works)
+_BACKEND_PRIORITY = ["onnxruntime", "torch", "numpy"]
 
 
 # ---------------------------------------------------------------------------
@@ -41,8 +41,9 @@ def detect_backend() -> str:
     Detect the best available embedding backend.
 
     Priority:
-      1. onnxruntime — CPU-only, small footprint, no GPU/CUDA needed
-      2. torch — heavier, but supports GPU acceleration
+      1. onnxruntime — CPU-only, best quality, ~50MB
+      2. torch — heavier, supports GPU, ~2GB
+      3. numpy — TF-IDF fallback, always works, zero extra deps
 
     Unlike ``importlib.util.find_spec()``, this function actually tries to
     *import* the package to catch DLL load failures (common on Windows
@@ -51,7 +52,8 @@ def detect_backend() -> str:
     Returns:
         ``"onnxruntime"`` if onnxruntime (and tokenizers) are importable,
         ``"torch"`` if only torch is available,
-        or an empty string if neither is available.
+        ``"numpy"`` as last resort (numpy is a core dependency, always available),
+        or an empty string if even numpy is missing.
     """
     for backend in _BACKEND_PRIORITY:
         try:
@@ -66,6 +68,9 @@ def detect_backend() -> str:
                 if importlib.util.find_spec("huggingface_hub") is None:
                     logger.debug("ONNX backend: huggingface_hub not installed")
                     continue
+            if backend == "numpy":
+                # numpy is a core dep — if this fails, nothing works
+                pass
             logger.debug(f"Detected embedding backend: {backend}")
             return backend
         except ImportError:
@@ -76,7 +81,7 @@ def detect_backend() -> str:
             continue
         except Exception:
             continue
-    logger.debug("No embedding backend detected (onnxruntime or torch)")
+    logger.debug("No embedding backend detected")
     return ""
 
 
@@ -197,6 +202,8 @@ def download_embedding_model(
         return _download_onnx(model_name, workspace_path)
     elif backend == "torch":
         return _download_torch(model_name, workspace_path)
+    elif backend == "numpy":
+        return _download_numpy(model_name, workspace_path)
     else:
         # No backend at all
         deps = check_onnx_deps()
@@ -276,6 +283,38 @@ def _download_onnx(model_name: str, workspace_path: str = "") -> bool:
         return False
     except Exception as e:
         logger.error(f"Failed to download/load ONNX model '{model_name}': {e}")
+        return False
+
+
+def _download_numpy(model_name: str, workspace_path: str = "") -> bool:
+    """
+    Use pure numpy TF-IDF encoder as fallback.
+
+    No download needed — TF-IDF is computed on the fly using only numpy.
+    This works on ANY machine regardless of native DLL availability.
+    """
+    logger.info("Using numpy TF-IDF backend (zero native dependencies)")
+
+    try:
+        from core.tfidf_encoder import TfidfEncoder
+
+        t0 = _time_monotonic()
+        encoder = TfidfEncoder(model_name)
+        elapsed = _time_monotonic() - t0
+
+        # Sanity check
+        test_vec = encoder.encode("test query", convert_to_numpy=True)
+        if test_vec is not None and test_vec.size > 0:
+            logger.info(
+                f"TF-IDF encoder ready in {elapsed:.1f}s "
+                f"(embedding dim={test_vec.shape[0]}, numpy-only)"
+            )
+            return True
+        else:
+            logger.warning("TF-IDF encoder produced empty embedding.")
+            return False
+    except Exception as e:
+        logger.error(f"Failed to initialize TF-IDF encoder: {e}")
         return False
 
 

@@ -584,20 +584,19 @@ def cmd_doctor(args):
     print(f"\n  Summary:")
     print(f"    Detected backend: {backend or 'NONE'}")
     if backend == "onnxruntime":
-        print(f"    Semantic search: READY (ONNX)")
+        print(f"    Semantic search: READY (ONNX Runtime)")
     elif backend == "torch":
         print(f"    Semantic search: READY (torch, may crash without GPU)")
+    elif backend == "numpy":
+        print(f"    Semantic search: READY (TF-IDF, numpy-only)")
     else:
         print(f"    Semantic search: BM25-ONLY (no working embedding backend)")
         # Show specific fix based on what's missing
         if not onnx_ok:
-            print(f"\n    FIX — Install missing ONNX packages:")
+            print(f"\n    FIX — Install ONNX packages for best quality:")
             print(f"      pip install onnxruntime tokenizers huggingface_hub")
-            print(f"    If onnxruntime shows DLL error after install:")
-            print(f"      1. Install VC++ Redistributable:")
-            print(f"         https://aka.ms/vs/17/release/vc_redist.x64.exe")
-            print(f"      2. Then reinstall:")
-            print(f"         pip uninstall onnxruntime -y && pip install onnxruntime")
+            print(f"    If DLL error: install VC++ Redistributable:")
+            print(f"      https://aka.ms/vs/17/release/vc_redist.x64.exe")
         print(f"\n    Then run: skills-lab download-model")
 
     print()

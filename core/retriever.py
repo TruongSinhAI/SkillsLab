@@ -290,11 +290,10 @@ class HybridRetriever:
         Backend selection (priority):
           1. ONNX Runtime — CPU-only, no torch/GPU needed (~50MB)
           2. PyTorch — heavier, works on CPU and GPU (~2GB)
+          3. NumPy TF-IDF — always works, zero extra deps (fallback)
 
-        IMPORTANT: When ONNX is selected, we use ``OnnxEncoder`` (pure
-        onnxruntime + tokenizers) and NEVER import sentence_transformers
-        or torch.  This avoids the c10.dll / CUDA driver crash on machines
-        without GPU.
+        IMPORTANT: When ONNX/Torch both fail (DLL errors on Windows),
+        we fall back to TfidfEncoder (pure numpy, always works).
         """
         with self._model_lock:
             if self._model_loaded:
@@ -308,20 +307,23 @@ class HybridRetriever:
                 logger.info("Semantic search not available. Using BM25-only.")
                 return
 
-            # Detect backend — fast probe using importlib (milliseconds)
+            # Detect backend — actually tries to import
             backend = detect_backend()
             if not backend:
                 logger.warning(
-                    "No embedding backend found (onnxruntime or torch). "
+                    "No embedding backend found (not even numpy). "
                     "Falling back to BM25-only search."
                 )
                 self._semantic_available = False
                 return
 
-            if backend == "onnx":
+            if backend == "onnxruntime":
                 self._load_model_onnx(t0)
-            else:
+            elif backend == "torch":
                 self._load_model_torch(t0)
+            else:
+                # numpy or anything else → TF-IDF fallback
+                self._load_model_numpy(t0)
 
     def _load_model_onnx(self, t0: float) -> None:
         """Load model using pure ONNX path (no torch, no sentence_transformers)."""
@@ -394,9 +396,25 @@ class HybridRetriever:
                 logger.warning(f"Cannot load model {model_name} (torch): {e}")
                 continue
 
-        logger.warning("No embedding model available. Falling back to BM25-only search.")
+        logger.warning("No PyTorch embedding model available.")
         self._model = None
         self._semantic_available = False
+
+    def _load_model_numpy(self, t0: float) -> None:
+        """Load TF-IDF encoder as ultimate fallback (pure numpy, always works)."""
+        logger.info("Using numpy TF-IDF backend (zero native dependencies)")
+
+        try:
+            from core.tfidf_encoder import TfidfEncoder
+
+            self._model = TfidfEncoder(self._model_name)
+            elapsed = time.time() - t0
+            logger.info(f"TF-IDF encoder ready (total: {elapsed:.1f}s, numpy-only)")
+        except Exception as e:
+            logger.warning(f"Cannot initialize TF-IDF encoder: {e}")
+            logger.warning("Falling back to BM25-only search.")
+            self._model = None
+            self._semantic_available = False
 
     def _get_embedding(self, text: str) -> Optional[np.ndarray]:
         """
