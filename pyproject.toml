@@ -8,7 +8,7 @@ version = "3.0.0"
 description = "MCP Server for AI coding agents — save, search, evolve technical knowledge as Skills (SKILL.md standard)"
 readme = "README.md"
 license = {text = "MIT"}
-requires-python = ">=3.10"
+requires-python = ">=3.10,<3.13"
 authors = [{name = "Skills Lab"}]
 keywords = ["mcp", "ai", "knowledge-management", "skills", "skill-md", "coding-agent", "copilot", "claude"]
 classifiers = [
@@ -18,6 +18,8 @@ classifiers = [
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    # Python 3.13+ NOT supported — onnxruntime DLL crash, breaking changes
+
     "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
 ]

@@ -504,6 +504,20 @@ def cmd_doctor(args):
 
     print(f"\n  Skills Lab Doctor — System Check\n")
     print(f"  Python:    {platform.python_version()}")
+
+    # Warn about Python 3.13+ — onnxruntime not compatible
+    py_ver = tuple(int(x) for x in platform.python_version().split(".")[:2])
+    if py_ver >= (3, 13):
+        print(f"  [WARNING] Python {platform.python_version()} detected!")
+        print(f"            onnxruntime does NOT support Python 3.13+")
+        print(f"            Semantic search quality will be reduced (TF-IDF fallback)")
+        print(f"  FIX (choose one):")
+        print(f"    1. Create a Python 3.12 venv:")
+        print(f"         py -3.12 -m venv venv312 && venv312\\Scripts\\activate")
+        print(f"         pip install -e .[dev] onnxruntime tokenizers huggingface_hub")
+        print(f"    2. Use Docker (recommended):")
+        print(f"         docker compose up --build")
+
     print(f"  Platform:  {platform.platform()}")
     print(f"  Arch:      {platform.machine()}")
 
@@ -908,6 +922,10 @@ Usage:
     skills-lab download-model   Download embedding model for semantic search
     skills-lab doctor           Check system dependencies and diagnose issues
     skills-lab version          Show version
+
+Docker (no setup needed, full ONNX quality):
+    docker compose up --build    Start dashboard with semantic search
+    docker compose run mcp        Start MCP server for AI agent
 
 Export Options:
     --all                       Include inactive skills

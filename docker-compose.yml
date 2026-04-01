@@ -1,0 +1,27 @@
+services:
+  skills-lab:
+    build: .
+    container_name: skills-lab
+    ports:
+      - "7788:7788"   # Dashboard
+    volumes:
+      - ./workspace:/app/workspace   # Persist skills data
+    environment:
+      - SKILLS_LAB_WORKSPACE=/app/workspace
+      - SKILLS_LAB_PORT=7788
+      - SKILLS_LAB_SEMANTIC=1
+    restart: unless-stopped
+
+  # MCP server (stdio mode — for Claude/Cursor/Copilot)
+  # Run manually: docker compose run mcp
+  mcp:
+    build: .
+    container_name: skills-lab-mcp
+    volumes:
+      - ./workspace:/app/workspace
+    environment:
+      - SKILLS_LAB_WORKSPACE=/app/workspace
+      - SKILLS_LAB_SEMANTIC=1
+    command: ["python", "-m", "cli", "run-mcp"]
+    profiles:
+      - mcp
