@@ -279,14 +279,32 @@ docs(readme): update installation instructions
     print(f"\n  Downloading embedding model...")
     print(f"   (this may take a minute on first run)")
     try:
-        from core.model_manager import download_with_fallback
+        from core.model_manager import download_with_fallback, detect_backend, check_onnx_deps
+
+        # Show backend status before trying
+        backend = detect_backend()
+        if backend == "onnx":
+            print(f"   Backend: ONNX (CPU-only, no GPU needed)")
+        elif backend == "torch":
+            print(f"   Backend: PyTorch (warning: may crash without GPU)")
+            print(f"   TIP: For no-GPU machines, install ONNX deps:")
+            print(f"         pip install onnxruntime tokenizers huggingface_hub")
+        else:
+            deps = check_onnx_deps()
+            missing = [k for k, v in deps.items() if not v]
+            print(f"   [warn] No embedding backend found!")
+            print(f"          Missing: {', '.join(missing)}")
+            print(f"          Install with: pip install onnxruntime tokenizers huggingface_hub")
+
         success, loaded_model = download_with_fallback(workspace)
         if success:
             print(f"   Semantic search model ready: {loaded_model}")
         else:
             print(f"   [warn] Could not download embedding model.")
             print(f"          Semantic search will use BM25-only mode.")
-            print(f"          Run 'skills-lab download-model' to retry later.")
+            print(f"          To fix, install ONNX deps and retry:")
+            print(f"            pip install onnxruntime tokenizers huggingface_hub")
+            print(f"            skills-lab download-model")
     except Exception as e:
         print(f"   [warn] Model download skipped: {e}")
         print(f"          Run 'skills-lab download-model' to download manually.")
@@ -409,9 +427,23 @@ def cmd_download_model(args):
         FALLBACK_MODEL,
         download_embedding_model,
         download_with_fallback,
+        detect_backend,
+        check_onnx_deps,
     )
 
     workspace = _get_workspace()
+
+    # Show backend info
+    backend = detect_backend()
+    print(f"\n  Detected backend: {backend or 'none'}")
+    if backend != "onnx":
+        deps = check_onnx_deps()
+        missing = [k for k, v in deps.items() if not v]
+        if missing:
+            print(f"  Missing ONNX deps: {', '.join(missing)}")
+        print(f"  For best compatibility (no GPU needed):")
+        print(f"    pip install onnxruntime tokenizers huggingface_hub")
+        print()
 
     parser = argparse.ArgumentParser(prog="skills-lab download-model")
     parser.add_argument(

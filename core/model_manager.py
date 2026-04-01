@@ -11,6 +11,7 @@ Backends (auto-selected in priority order):
   1. ONNX Runtime — CPU-only, no torch/GPU needed (~50MB extra)
      Uses ``onnxruntime`` + ``tokenizers`` directly. Zero torch dependency.
   2. PyTorch — requires torch + sentence-transformers (~2GB extra)
+     WARNING: May crash on Windows machines without GPU/C++ redistributable.
 
 Cache locations checked (in order):
   1. Workspace local cache (workspace/.cache/models/)
@@ -31,7 +32,7 @@ _BACKEND_PRIORITY = ["onnx", "torch"]
 
 
 # ---------------------------------------------------------------------------
-# Cache detection
+# Backend detection
 # ---------------------------------------------------------------------------
 
 
@@ -54,8 +55,10 @@ def detect_backend() -> str:
                 if backend == "onnx":
                     # ONNX path also needs tokenizers and huggingface_hub
                     if importlib.util.find_spec("tokenizers") is None:
+                        logger.debug("ONNX backend: tokenizers not installed")
                         continue
-                    if importlib.util.find_spec("onnx") is None:
+                    if importlib.util.find_spec("huggingface_hub") is None:
+                        logger.debug("ONNX backend: huggingface_hub not installed")
                         continue
                 logger.debug(f"Detected embedding backend: {backend}")
                 return backend
@@ -65,11 +68,33 @@ def detect_backend() -> str:
     return ""
 
 
+def check_onnx_deps() -> dict[str, bool]:
+    """
+    Check which ONNX dependencies are installed.
+
+    Returns:
+        A dict with keys ``onnxruntime``, ``tokenizers``, ``huggingface_hub``
+        and boolean values indicating availability.
+    """
+    deps = {}
+    for pkg in ("onnxruntime", "tokenizers", "huggingface_hub"):
+        try:
+            deps[pkg] = importlib.util.find_spec(pkg) is not None
+        except Exception:
+            deps[pkg] = False
+    return deps
+
+
+# ---------------------------------------------------------------------------
+# Cache detection
+# ---------------------------------------------------------------------------
+
+
 def is_model_cached(model_name: str, workspace_path: str = "") -> bool:
     """
     Check whether an embedding model is already cached locally.
 
-    Checks three locations (short-circuits on first match):
+    Checks multiple locations (short-circuits on first match):
       1. Workspace local cache (fastest — local directory check)
       2. HuggingFace hub cache for ONNX models
       3. HuggingFace hub cache (generic scan)
@@ -135,10 +160,10 @@ def download_embedding_model(
     """
     Download and cache an embedding model for semantic search.
 
-    When the ONNX backend is detected, uses the pure ``OnnxEncoder``
-    (onnxruntime + tokenizers) — zero torch dependency.
-    When only the torch backend is available, falls back to
-    ``sentence_transformers.SentenceTransformer``.
+    Strategy:
+      1. If ONNX deps are available → use pure OnnxEncoder (zero torch)
+      2. If only torch is available → warn about potential crash, try it
+      3. If torch also fails (e.g. c10.dll crash) → return False with clear message
 
     Args:
         model_name: HuggingFace model identifier.
@@ -152,16 +177,19 @@ def download_embedding_model(
     logger.info(f"Checking embedding model: {model_name}")
 
     backend = detect_backend()
-    if not backend:
-        logger.warning(
-            "No embedding backend found (onnxruntime or torch). Cannot load model."
-        )
-        return False
-
     if backend == "onnx":
         return _download_onnx(model_name, workspace_path)
-    else:
+    elif backend == "torch":
         return _download_torch(model_name, workspace_path)
+    else:
+        # No backend at all
+        deps = check_onnx_deps()
+        missing = [k for k, v in deps.items() if not v]
+        logger.warning(
+            f"No embedding backend found. Missing packages: {', '.join(missing)}. "
+            f"Install with: pip install onnxruntime tokenizers huggingface_hub"
+        )
+        return False
 
 
 def _download_onnx(model_name: str, workspace_path: str = "") -> bool:
@@ -198,6 +226,9 @@ def _download_onnx(model_name: str, workspace_path: str = "") -> bool:
         else:
             logger.warning(f"Model '{model_name}' loaded but produced empty embedding.")
             return False
+    except ImportError as e:
+        logger.error(f"ONNX backend missing dependency: {e}")
+        return False
     except Exception as e:
         logger.error(f"Failed to download/load ONNX model '{model_name}': {e}")
         return False
@@ -208,28 +239,27 @@ def _download_torch(model_name: str, workspace_path: str = "") -> bool:
     Download and verify an embedding model using the torch backend.
 
     Requires ``sentence_transformers`` and ``torch`` to be installed.
+
+    WARNING: This may crash on Windows machines without GPU or C++
+    redistributable (c10.dll error).  ONNX backend is strongly recommended.
     """
-    logger.info("Using PyTorch backend")
+    logger.warning(
+        "Using PyTorch backend — this may crash on machines without GPU! "
+        "For best compatibility, install ONNX deps instead: "
+        "pip install onnxruntime tokenizers huggingface_hub"
+    )
 
     # Fast probe — is sentence_transformers importable?
     try:
         if importlib.util.find_spec("sentence_transformers") is None:
             logger.warning(
                 "sentence-transformers is not installed. "
-                "Cannot download embedding model. "
-                "Install with: pip install 'skills-lab[semantic]'"
+                "Cannot use torch backend. "
+                "Install ONNX deps instead: pip install onnxruntime tokenizers huggingface_hub"
             )
             return False
     except Exception:
         pass
-
-    # Disable CUDA if not available to avoid crashes
-    try:
-        import torch
-        if not torch.cuda.is_available():
-            logger.info("PyTorch CPU backend (GPU not available)")
-    except Exception:
-        logger.info("PyTorch backend")
 
     if is_model_cached(model_name, workspace_path):
         logger.info(f"Model '{model_name}' is already cached.")
@@ -254,6 +284,20 @@ def _download_torch(model_name: str, workspace_path: str = "") -> bool:
         else:
             logger.warning(f"Model '{model_name}' loaded but produced empty embedding.")
             return False
+    except OSError as e:
+        # Catch Windows DLL errors (c10.dll) and give actionable message
+        error_str = str(e)
+        if "c10.dll" in error_str or "DLL" in error_str or "1114" in error_str:
+            logger.error(
+                f"PyTorch DLL error (common on Windows without GPU): {e}\n"
+                f"SOLUTION: Uninstall torch and use ONNX backend instead:\n"
+                f"  pip uninstall torch sentence-transformers\n"
+                f"  pip install onnxruntime tokenizers huggingface_hub\n"
+                f"Then run: skills-lab download-model"
+            )
+        else:
+            logger.error(f"Failed to download/load model '{model_name}' (torch): {e}")
+        return False
     except Exception as e:
         logger.error(f"Failed to download/load model '{model_name}' (torch): {e}")
         return False
