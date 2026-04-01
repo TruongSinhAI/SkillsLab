@@ -34,10 +34,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-semantic-onnx = ["sentence-transformers>=2.0", "onnxruntime>=1.16"]
+semantic-onnx = ["onnxruntime>=1.16", "tokenizers>=0.13", "huggingface_hub>=0.16"]
 semantic = ["sentence-transformers>=2.0", "torch"]
 dev = ["pytest>=7.0", "pytest-cov>=4.0", "httpx"]
-all = ["sentence-transformers>=2.0", "onnxruntime>=1.16", "torch", "pytest>=7.0", "pytest-cov>=4.0", "httpx"]
+all = ["onnxruntime>=1.16", "tokenizers>=0.13", "huggingface_hub>=0.16", "sentence-transformers>=2.0", "torch", "pytest>=7.0", "pytest-cov>=4.0", "httpx"]
 
 [project.scripts]
 skills-lab = "cli:main"

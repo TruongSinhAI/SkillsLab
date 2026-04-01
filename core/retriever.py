@@ -290,6 +290,11 @@ class HybridRetriever:
         Backend selection (priority):
           1. ONNX Runtime — CPU-only, no torch/GPU needed (~50MB)
           2. PyTorch — heavier, works on CPU and GPU (~2GB)
+
+        IMPORTANT: When ONNX is selected, we use ``OnnxEncoder`` (pure
+        onnxruntime + tokenizers) and NEVER import sentence_transformers
+        or torch.  This avoids the c10.dll / CUDA driver crash on machines
+        without GPU.
         """
         with self._model_lock:
             if self._model_loaded:
@@ -303,70 +308,95 @@ class HybridRetriever:
                 logger.info("Semantic search not available. Using BM25-only.")
                 return
 
-            # Fast probe: check if sentence_transformers is importable WITHOUT
-            # actually importing the heavy torch/numpy dependency chain.
-            try:
-                import importlib.util
-                if importlib.util.find_spec("sentence_transformers") is None:
-                    backend = detect_backend()
-                    if backend:
-                        logger.warning(
-                            "sentence-transformers not installed. "
-                            "Install with: pip install 'skills-lab[semantic-onnx]'. "
-                            "Falling back to BM25-only search."
-                        )
-                    else:
-                        logger.warning(
-                            "sentence-transformers not installed. "
-                            "Install with: pip install 'skills-lab[semantic-onnx]' (recommended) "
-                            "or pip install 'skills-lab[semantic]'. Falling back to BM25-only search."
-                        )
-                    self._semantic_available = False
-                    return
-            except Exception:
-                pass
-
-            # Select and configure the best backend BEFORE importing sentence_transformers.
-            # This ensures we never accidentally pull in torch when onnxruntime is available.
+            # Detect backend — fast probe using importlib (milliseconds)
             backend = detect_backend()
+            if not backend:
+                logger.warning(
+                    "No embedding backend found (onnxruntime or torch). "
+                    "Falling back to BM25-only search."
+                )
+                self._semantic_available = False
+                return
+
             if backend == "onnx":
-                # Force ONNX backend — avoids loading torch entirely.
-                os.environ.setdefault("SENTENCE_TRANSFORMERS_BACKEND", "onnx")
-                logger.info("Using ONNX backend (CPU-only, no GPU required)")
+                self._load_model_onnx(t0)
             else:
-                logger.info("Using PyTorch backend")
+                self._load_model_torch(t0)
 
-            # Package exists — try loading models (may still fail at runtime).
-            # NOTE: First-time load downloads ~100MB model weights.
-            # Subsequent loads use cached files and take 2-5s on CPU.
-            for model_name in [self._model_name, self._fallback_model_name]:
-                try:
-                    from sentence_transformers import SentenceTransformer
-                    logger.info(f"Loading embedding model: {model_name} (backend={backend})...")
-                    t1 = time.time()
-                    self._model = SentenceTransformer(model_name)
-                    t2 = time.time()
-                    logger.info(f"Embedding model loaded: {model_name} ({t2 - t1:.1f}s, backend={backend})")
+    def _load_model_onnx(self, t0: float) -> None:
+        """Load model using pure ONNX path (no torch, no sentence_transformers)."""
+        logger.info("Using ONNX backend (CPU-only, no GPU required)")
 
-                    if hasattr(self._model, 'max_seq_length') and self._model.max_seq_length < 512:
-                        try:
-                            config = self._model[0].auto_model.config
-                            max_pos = config.max_position_embeddings
-                            if max_pos > self._model.max_seq_length:
-                                self._model.max_seq_length = min(max_pos, 512)
-                                logger.info(f"  Overriding max_seq_length -> {self._model.max_seq_length}")
-                        except Exception:
-                            pass
+        cache_dir = os.path.join(self._workspace_path, ".cache", "models") if self._workspace_path else ""
 
-                    logger.info(f"Semantic search ready (total load time: {t2 - t0:.1f}s, backend={backend})")
-                    return
-                except Exception as e:
-                    logger.warning(f"Cannot load model {model_name} (backend={backend}): {e}")
-                    continue
+        for model_name in [self._model_name, self._fallback_model_name]:
+            try:
+                from core.onnx_encoder import OnnxEncoder
 
-            logger.warning("No embedding model available. Falling back to BM25-only search.")
-            self._model = None
-            self._semantic_available = False
+                logger.info(f"Loading embedding model: {model_name} (ONNX)...")
+                t1 = time.time()
+                self._model = OnnxEncoder(model_name, cache_dir=cache_dir)
+                t2 = time.time()
+                logger.info(f"Embedding model loaded: {model_name} ({t2 - t1:.1f}s, ONNX)")
+
+                logger.info(f"Semantic search ready (total load time: {t2 - t0:.1f}s, ONNX)")
+                return
+            except Exception as e:
+                logger.warning(f"Cannot load ONNX model {model_name}: {e}")
+                continue
+
+        logger.warning("No ONNX embedding model available. Falling back to BM25-only search.")
+        self._model = None
+        self._semantic_available = False
+
+    def _load_model_torch(self, t0: float) -> None:
+        """Load model using torch/sentence_transformers path."""
+        # Check if sentence_transformers is available
+        try:
+            import importlib.util
+            if importlib.util.find_spec("sentence_transformers") is None:
+                logger.warning(
+                    "sentence-transformers not installed. "
+                    "Install with: pip install 'skills-lab[semantic]' "
+                    "or pip install 'skills-lab[semantic-onnx]' (recommended, no GPU needed). "
+                    "Falling back to BM25-only search."
+                )
+                self._semantic_available = False
+                return
+        except Exception:
+            pass
+
+        logger.info("Using PyTorch backend")
+
+        for model_name in [self._model_name, self._fallback_model_name]:
+            try:
+                from sentence_transformers import SentenceTransformer
+
+                logger.info(f"Loading embedding model: {model_name} (torch)...")
+                t1 = time.time()
+                self._model = SentenceTransformer(model_name)
+                t2 = time.time()
+                logger.info(f"Embedding model loaded: {model_name} ({t2 - t1:.1f}s, torch)")
+
+                if hasattr(self._model, 'max_seq_length') and self._model.max_seq_length < 512:
+                    try:
+                        config = self._model[0].auto_model.config
+                        max_pos = config.max_position_embeddings
+                        if max_pos > self._model.max_seq_length:
+                            self._model.max_seq_length = min(max_pos, 512)
+                            logger.info(f"  Overriding max_seq_length -> {self._model.max_seq_length}")
+                    except Exception:
+                        pass
+
+                logger.info(f"Semantic search ready (total load time: {t2 - t0:.1f}s, torch)")
+                return
+            except Exception as e:
+                logger.warning(f"Cannot load model {model_name} (torch): {e}")
+                continue
+
+        logger.warning("No embedding model available. Falling back to BM25-only search.")
+        self._model = None
+        self._semantic_available = False
 
     def _get_embedding(self, text: str) -> Optional[np.ndarray]:
         """

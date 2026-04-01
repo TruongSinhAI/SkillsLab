@@ -10,5 +10,6 @@ pyyaml>=6.0
 
 # Semantic search (optional — BM25 works without this)
 # Recommended (no GPU needed): pip install 'skills-lab[semantic-onnx]'
+#   → onnxruntime + tokenizers + huggingface_hub (zero torch dependency)
 # With GPU support:       pip install 'skills-lab[semantic]'
-# sentence-transformers>=2.0
+#   → sentence-transformers + torch
