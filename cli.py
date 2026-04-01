@@ -283,8 +283,8 @@ docs(readme): update installation instructions
 
         # Show backend status before trying
         backend = detect_backend()
-        if backend == "onnx":
-            print(f"   Backend: ONNX (CPU-only, no GPU needed)")
+        if backend == "onnxruntime":
+            print(f"   Backend: ONNX Runtime (CPU-only, no GPU needed)")
         elif backend == "torch":
             print(f"   Backend: PyTorch (warning: may crash without GPU)")
             print(f"   TIP: For no-GPU machines, install ONNX deps:")
@@ -436,7 +436,7 @@ def cmd_download_model(args):
     # Show backend info
     backend = detect_backend()
     print(f"\n  Detected backend: {backend or 'none'}")
-    if backend != "onnx":
+    if backend != "onnxruntime":
         deps = check_onnx_deps()
         missing = [k for k, v in deps.items() if not v]
         if missing:
@@ -465,9 +465,9 @@ def cmd_download_model(args):
             print(f"  Model '{model_name}' downloaded and ready.")
         else:
             print(f"  Failed to download '{model_name}'.")
-            print(f"  Make sure sentence-transformers is installed:")
-            print(f"    pip install 'skills-lab[semantic-onnx]'  (recommended, no GPU)")
-            print(f"    pip install 'skills-lab[semantic]'      (with GPU support)")
+            print(f"  Install ONNX deps (recommended, no GPU):")
+            print(f"    pip install onnxruntime tokenizers huggingface_hub")
+            print(f"  Then retry: skills-lab download-model")
     else:
         # Default: try primary, fallback to backup
         print(f"  Downloading embedding model...")
@@ -480,9 +480,9 @@ def cmd_download_model(args):
         else:
             print(f"  Failed to download any embedding model.")
             print(f"  Semantic search will use BM25-only mode.")
-            print(f"  Make sure sentence-transformers is installed:")
-            print(f"    pip install 'skills-lab[semantic-onnx]'  (recommended, no GPU)")
-            print(f"    pip install 'skills-lab[semantic]'      (with GPU support)")
+            print(f"  Install ONNX deps (recommended, no GPU):")
+            print(f"    pip install onnxruntime tokenizers huggingface_hub")
+            print(f"  Then retry: skills-lab download-model")
     print()
 
 

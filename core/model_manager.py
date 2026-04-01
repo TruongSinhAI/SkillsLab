@@ -177,7 +177,7 @@ def download_embedding_model(
     logger.info(f"Checking embedding model: {model_name}")
 
     backend = detect_backend()
-    if backend == "onnx":
+    if backend == "onnxruntime":
         return _download_onnx(model_name, workspace_path)
     elif backend == "torch":
         return _download_torch(model_name, workspace_path)
