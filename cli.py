@@ -14,6 +14,7 @@ Usage:
     skills-lab stats            Show workspace statistics
     skills-lab search <query>   Search skills by name, description, tags
     skills-lab download-model   Download embedding model for semantic search
+    skills-lab doctor           Check system dependencies and diagnose issues
     skills-lab version          Show version
 
 Install:
@@ -492,6 +493,111 @@ def cmd_version(args):
     print("MCP Server for AI coding agents")
 
 
+def cmd_doctor(args):
+    """Check system dependencies and diagnose issues.
+
+    Usage:
+        skills-lab doctor
+    """
+    _ensure_project_root()
+    import platform
+
+    print(f"\n  Skills Lab Doctor — System Check\n")
+    print(f"  Python:    {platform.python_version()}")
+    print(f"  Platform:  {platform.platform()}")
+    print(f"  Arch:      {platform.machine()}")
+
+    # Check core packages
+    core_deps = {
+        "sqlalchemy": "SQL database (core)",
+        "rank_bm25": "BM25 search (core)",
+        "numpy": "Numerical ops (core)",
+        "fastapi": "Dashboard API (core)",
+        "mcp": "MCP server (core)",
+        "yaml": "SKILL.md parsing (core)",
+    }
+
+    print(f"\n  Core dependencies:")
+    for pkg, desc in core_deps.items():
+        try:
+            mod = __import__(pkg)
+            ver = getattr(mod, "__version__", "?")
+            print(f"    [OK] {pkg} {ver} — {desc}")
+        except ImportError:
+            print(f"    [MISSING] {pkg} — {desc}")
+
+    # Check ONNX backend
+    onnx_deps = {
+        "onnxruntime": "ONNX inference engine",
+        "tokenizers": "Fast tokenizer (Rust)",
+        "huggingface_hub": "Model download from HuggingFace",
+    }
+
+    print(f"\n  ONNX backend (recommended — no GPU needed):")
+    onnx_ok = True
+    for pkg, desc in onnx_deps.items():
+        try:
+            mod = __import__(pkg)
+            ver = getattr(mod, "__version__", "?")
+            print(f"    [OK] {pkg} {ver} — {desc}")
+        except ImportError:
+            print(f"    [MISSING] {pkg} — {desc}")
+            onnx_ok = False
+
+    # Try actually importing onnxruntime (catch DLL errors)
+    if onnx_ok:
+        try:
+            import onnxruntime as ort
+            # Try creating a session to verify it actually works
+            print(f"    [OK] onnxruntime providers: {ort.get_available_providers()}")
+        except OSError as e:
+            error_str = str(e)
+            if "DLL" in error_str or "pybind11" in error_str:
+                print(f"    [ERROR] onnxruntime DLL load failed!")
+                print(f"    FIX: Install Microsoft Visual C++ Redistributable:")
+                print(f"      https://aka.ms/vs/17/release/vc_redist.x64.exe")
+                print(f"    Then: pip uninstall onnxruntime -y && pip install onnxruntime")
+            else:
+                print(f"    [ERROR] onnxruntime: {e}")
+        except Exception as e:
+            print(f"    [ERROR] onnxruntime: {e}")
+
+    # Check torch (optional)
+    print(f"\n  PyTorch backend (optional — requires GPU or VC++ redistributable):")
+    try:
+        import torch
+        ver = torch.__version__
+        cuda = "CUDA" if torch.cuda.is_available() else "CPU-only"
+        print(f"    [OK] torch {ver} — {cuda}")
+    except ImportError:
+        print(f"    [NOT INSTALLED] torch — not needed for ONNX backend")
+    except OSError as e:
+        if "c10.dll" in str(e) or "DLL" in str(e):
+            print(f"    [ERROR] torch DLL load failed (c10.dll)")
+            print(f"    FIX: pip uninstall torch sentence-transformers")
+            print(f"    Then use ONNX backend instead (see above)")
+        else:
+            print(f"    [ERROR] torch: {e}")
+
+    # Summary
+    from core.model_manager import detect_backend
+    backend = detect_backend()
+
+    print(f"\n  Summary:")
+    print(f"    Detected backend: {backend or 'NONE'}")
+    if backend == "onnxruntime":
+        print(f"    Semantic search: READY (ONNX)")
+    elif backend == "torch":
+        print(f"    Semantic search: READY (torch, may crash without GPU)")
+    else:
+        print(f"    Semantic search: BM25-ONLY (no embedding backend)")
+        print(f"    To enable: pip install onnxruntime tokenizers huggingface_hub")
+        print(f"    If DLL error: install VC++ Redistributable (see above)")
+        print(f"    Then: skills-lab download-model")
+
+    print()
+
+
 # ---------------------------------------------------------------------------
 # New commands: export, import, stats, search
 # ---------------------------------------------------------------------------
@@ -796,6 +902,7 @@ Usage:
     skills-lab stats            Show workspace statistics
     skills-lab search <query>   Search skills by name, description, tags
     skills-lab download-model   Download embedding model for semantic search
+    skills-lab doctor           Check system dependencies and diagnose issues
     skills-lab version          Show version
 
 Export Options:
@@ -851,6 +958,7 @@ Environment Variables:
         "download-model": cmd_download_model,
         "download_model": cmd_download_model,
         "diff": cmd_diff,
+        "doctor": cmd_doctor,
     }
 
     handler = commands.get(cmd)

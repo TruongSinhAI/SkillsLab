@@ -227,7 +227,36 @@ def _download_onnx(model_name: str, workspace_path: str = "") -> bool:
             logger.warning(f"Model '{model_name}' loaded but produced empty embedding.")
             return False
     except ImportError as e:
-        logger.error(f"ONNX backend missing dependency: {e}")
+        error_str = str(e)
+        if "onnxruntime" in error_str and ("DLL" in error_str or "pybind11" in error_str):
+            logger.error(
+                f"onnxruntime DLL load failed: {e}\n"
+                f"This means Microsoft Visual C++ Redistributable is missing or corrupted.\n"
+                f"FIX (choose one):\n"
+                f"  1. Download and install VC++ Redistributable:\n"
+                f"     https://aka.ms/vs/17/release/vc_redist.x64.exe\n"
+                f"  2. Then reinstall onnxruntime:\n"
+                f"     pip uninstall onnxruntime -y && pip install onnxruntime\n"
+                f"  3. Then retry: skills-lab download-model"
+            )
+        else:
+            logger.error(f"ONNX backend missing dependency: {e}")
+        return False
+    except OSError as e:
+        error_str = str(e)
+        if "DLL" in error_str or "pybind11" in error_str:
+            logger.error(
+                f"onnxruntime DLL load failed: {e}\n"
+                f"This means Microsoft Visual C++ Redistributable is missing or corrupted.\n"
+                f"FIX (choose one):\n"
+                f"  1. Download and install VC++ Redistributable:\n"
+                f"     https://aka.ms/vs/17/release/vc_redist.x64.exe\n"
+                f"  2. Then reinstall onnxruntime:\n"
+                f"     pip uninstall onnxruntime -y && pip install onnxruntime\n"
+                f"  3. Then retry: skills-lab download-model"
+            )
+        else:
+            logger.error(f"Failed to download/load ONNX model '{model_name}': {e}")
         return False
     except Exception as e:
         logger.error(f"Failed to download/load ONNX model '{model_name}': {e}")
