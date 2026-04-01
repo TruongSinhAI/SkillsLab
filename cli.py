@@ -590,10 +590,17 @@ def cmd_doctor(args):
     elif backend == "torch":
         print(f"    Semantic search: READY (torch, may crash without GPU)")
     else:
-        print(f"    Semantic search: BM25-ONLY (no embedding backend)")
-        print(f"    To enable: pip install onnxruntime tokenizers huggingface_hub")
-        print(f"    If DLL error: install VC++ Redistributable (see above)")
-        print(f"    Then: skills-lab download-model")
+        print(f"    Semantic search: BM25-ONLY (no working embedding backend)")
+        # Show specific fix based on what's missing
+        if not onnx_ok:
+            print(f"\n    FIX — Install missing ONNX packages:")
+            print(f"      pip install onnxruntime tokenizers huggingface_hub")
+            print(f"    If onnxruntime shows DLL error after install:")
+            print(f"      1. Install VC++ Redistributable:")
+            print(f"         https://aka.ms/vs/17/release/vc_redist.x64.exe")
+            print(f"      2. Then reinstall:")
+            print(f"         pip uninstall onnxruntime -y && pip install onnxruntime")
+        print(f"\n    Then run: skills-lab download-model")
 
     print()
 

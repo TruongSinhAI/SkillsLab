@@ -44,6 +44,10 @@ def detect_backend() -> str:
       1. onnxruntime — CPU-only, small footprint, no GPU/CUDA needed
       2. torch — heavier, but supports GPU acceleration
 
+    Unlike ``importlib.util.find_spec()``, this function actually tries to
+    *import* the package to catch DLL load failures (common on Windows
+    without VC++ Redistributable).
+
     Returns:
         ``"onnxruntime"`` if onnxruntime (and tokenizers) are importable,
         ``"torch"`` if only torch is available,
@@ -51,17 +55,25 @@ def detect_backend() -> str:
     """
     for backend in _BACKEND_PRIORITY:
         try:
-            if importlib.util.find_spec(backend) is not None:
-                if backend == "onnxruntime":
-                    # ONNX path also needs tokenizers and huggingface_hub
-                    if importlib.util.find_spec("tokenizers") is None:
-                        logger.debug("ONNX backend: tokenizers not installed")
-                        continue
-                    if importlib.util.find_spec("huggingface_hub") is None:
-                        logger.debug("ONNX backend: huggingface_hub not installed")
-                        continue
-                logger.debug(f"Detected embedding backend: {backend}")
-                return backend
+            # Actually try to import — find_spec() only checks metadata,
+            # not whether the native DLLs can load (catches c10.dll / pybind11 errors)
+            __import__(backend)
+            if backend == "onnxruntime":
+                # ONNX path also needs tokenizers and huggingface_hub
+                if importlib.util.find_spec("tokenizers") is None:
+                    logger.debug("ONNX backend: tokenizers not installed")
+                    continue
+                if importlib.util.find_spec("huggingface_hub") is None:
+                    logger.debug("ONNX backend: huggingface_hub not installed")
+                    continue
+            logger.debug(f"Detected embedding backend: {backend}")
+            return backend
+        except ImportError:
+            continue
+        except OSError:
+            # DLL load failed (common on Windows) — skip this backend
+            logger.debug(f"Backend '{backend}' found but DLL load failed")
+            continue
         except Exception:
             continue
     logger.debug("No embedding backend detected (onnxruntime or torch)")
@@ -70,16 +82,20 @@ def detect_backend() -> str:
 
 def check_onnx_deps() -> dict[str, bool]:
     """
-    Check which ONNX dependencies are installed.
+    Check which ONNX dependencies are actually importable.
+
+    Unlike ``find_spec()``, this tests real imports so DLL errors
+    are properly detected.
 
     Returns:
         A dict with keys ``onnxruntime``, ``tokenizers``, ``huggingface_hub``
-        and boolean values indicating availability.
+        and boolean values indicating actual importability.
     """
     deps = {}
     for pkg in ("onnxruntime", "tokenizers", "huggingface_hub"):
         try:
-            deps[pkg] = importlib.util.find_spec(pkg) is not None
+            __import__(pkg)
+            deps[pkg] = True
         except Exception:
             deps[pkg] = False
     return deps
