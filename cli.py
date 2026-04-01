@@ -543,24 +543,22 @@ def cmd_doctor(args):
         except ImportError:
             print(f"    [MISSING] {pkg} — {desc}")
             onnx_ok = False
-
-    # Try actually importing onnxruntime (catch DLL errors)
-    if onnx_ok:
-        try:
-            import onnxruntime as ort
-            # Try creating a session to verify it actually works
-            print(f"    [OK] onnxruntime providers: {ort.get_available_providers()}")
         except OSError as e:
             error_str = str(e)
-            if "DLL" in error_str or "pybind11" in error_str:
-                print(f"    [ERROR] onnxruntime DLL load failed!")
-                print(f"    FIX: Install Microsoft Visual C++ Redistributable:")
-                print(f"      https://aka.ms/vs/17/release/vc_redist.x64.exe")
-                print(f"    Then: pip uninstall onnxruntime -y && pip install onnxruntime")
+            if "DLL" in error_str or "pybind" in error_str:
+                print(f"    [ERROR] {pkg} installed but DLL load failed!")
+                print(f"           {e}")
+                print(f"           FIX: Install Microsoft Visual C++ Redistributable:")
+                print(f"             https://aka.ms/vs/17/release/vc_redist.x64.exe")
+                print(f"           Then: pip uninstall {pkg} -y && pip install {pkg}")
             else:
-                print(f"    [ERROR] onnxruntime: {e}")
+                print(f"    [ERROR] {pkg}: {e}")
+            onnx_ok = False
         except Exception as e:
-            print(f"    [ERROR] onnxruntime: {e}")
+            print(f"    [ERROR] {pkg}: {e}")
+            onnx_ok = False
+
+    # No separate DLL check needed — already handled above
 
     # Check torch (optional)
     print(f"\n  PyTorch backend (optional — requires GPU or VC++ redistributable):")
