@@ -23,7 +23,6 @@ Performance improvements:
 """
 
 import logging
-import math
 import os
 import pickle
 import threading
@@ -32,10 +31,9 @@ from typing import Optional
 
 import numpy as np
 from rank_bm25 import BM25Okapi
-from sqlalchemy.orm import Session
 
 from core.models import Skill, SkillChangelog
-from core.model_manager import is_model_cached
+from core.model_manager import is_model_cached, detect_backend
 
 logger = logging.getLogger(__name__)
 
@@ -221,10 +219,29 @@ class HybridRetriever:
         """Load the embedding cache from disk if it exists."""
         path = self._cache_path()
         if os.path.exists(path):
+            # Security: verify the cache file is a regular file (not symlink)
+            # and is owned by the current user before deserializing.
+            try:
+                if os.path.islink(path):
+                    logger.warning(f"Embedding cache path is a symlink, skipping: {path}")
+                    return
+                st = os.stat(path)
+                import pwd
+                if st.st_uid != pwd.getpwuid(os.getuid()).pw_uid:
+                    logger.warning(f"Embedding cache file not owned by current user, skipping: {path}")
+                    return
+            except (OSError, ImportError):
+                pass  # Skip ownership check on non-Unix or if pwd unavailable
             try:
                 with open(path, "rb") as f:
                     data = pickle.load(f)
                 if isinstance(data, dict):
+                    # Validate all values are numpy arrays
+                    for key, value in data.items():
+                        if not isinstance(key, str) or not isinstance(value, np.ndarray):
+                            logger.warning(f"Invalid embedding cache entry (key={type(key)}, value={type(value)}), resetting cache")
+                            self._embedding_cache = {}
+                            return
                     self._embedding_cache = data
                     logger.info(f"Loaded {len(data)} cached embeddings from disk")
             except Exception as e:
@@ -269,6 +286,10 @@ class HybridRetriever:
         The import probe uses ``importlib.util.find_spec`` for a fast check
         (milliseconds) instead of actually importing the heavy package
         (which can take 5-10 seconds even when it ultimately fails).
+
+        Backend selection (priority):
+          1. ONNX Runtime — CPU-only, no torch/GPU needed (~50MB)
+          2. PyTorch — heavier, works on CPU and GPU (~2GB)
         """
         with self._model_lock:
             if self._model_loaded:
@@ -287,15 +308,33 @@ class HybridRetriever:
             try:
                 import importlib.util
                 if importlib.util.find_spec("sentence_transformers") is None:
-                    logger.warning(
-                        "sentence-transformers not installed. "
-                        "Install with: pip install sentence-transformers torch  "
-                        "Falling back to BM25-only search."
-                    )
+                    backend = detect_backend()
+                    if backend:
+                        logger.warning(
+                            "sentence-transformers not installed. "
+                            "Install with: pip install 'skills-lab[semantic-onnx]'. "
+                            "Falling back to BM25-only search."
+                        )
+                    else:
+                        logger.warning(
+                            "sentence-transformers not installed. "
+                            "Install with: pip install 'skills-lab[semantic-onnx]' (recommended) "
+                            "or pip install 'skills-lab[semantic]'. Falling back to BM25-only search."
+                        )
                     self._semantic_available = False
                     return
             except Exception:
                 pass
+
+            # Select and configure the best backend BEFORE importing sentence_transformers.
+            # This ensures we never accidentally pull in torch when onnxruntime is available.
+            backend = detect_backend()
+            if backend == "onnx":
+                # Force ONNX backend — avoids loading torch entirely.
+                os.environ.setdefault("SENTENCE_TRANSFORMERS_BACKEND", "onnx")
+                logger.info("Using ONNX backend (CPU-only, no GPU required)")
+            else:
+                logger.info("Using PyTorch backend")
 
             # Package exists — try loading models (may still fail at runtime).
             # NOTE: First-time load downloads ~100MB model weights.
@@ -303,11 +342,11 @@ class HybridRetriever:
             for model_name in [self._model_name, self._fallback_model_name]:
                 try:
                     from sentence_transformers import SentenceTransformer
-                    logger.info(f"Loading embedding model: {model_name}...")
+                    logger.info(f"Loading embedding model: {model_name} (backend={backend})...")
                     t1 = time.time()
                     self._model = SentenceTransformer(model_name)
                     t2 = time.time()
-                    logger.info(f"Embedding model loaded: {model_name} ({t2 - t1:.1f}s)")
+                    logger.info(f"Embedding model loaded: {model_name} ({t2 - t1:.1f}s, backend={backend})")
 
                     if hasattr(self._model, 'max_seq_length') and self._model.max_seq_length < 512:
                         try:
@@ -319,10 +358,10 @@ class HybridRetriever:
                         except Exception:
                             pass
 
-                    logger.info(f"Semantic search ready (total load time: {t2 - t0:.1f}s)")
+                    logger.info(f"Semantic search ready (total load time: {t2 - t0:.1f}s, backend={backend})")
                     return
                 except Exception as e:
-                    logger.warning(f"Cannot load model {model_name}: {e}")
+                    logger.warning(f"Cannot load model {model_name} (backend={backend}): {e}")
                     continue
 
             logger.warning("No embedding model available. Falling back to BM25-only search.")
@@ -503,7 +542,10 @@ class HybridRetriever:
             # First time — must build synchronously
             self._rebuild_bm25_index(skills)
 
-        return self._bm25_index, self._bm25_skill_ids
+        # Return a consistent snapshot under lock to avoid reading
+        # a partially-updated index/IDs pair from a concurrent background rebuild
+        with self._bm25_lock:
+            return self._bm25_index, self._bm25_skill_ids
 
     def _rebuild_bm25_async(self, skills: list[Skill]) -> None:
         """Rebuild BM25 index in a background thread (stale-while-revalidate)."""

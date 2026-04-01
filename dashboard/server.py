@@ -288,8 +288,6 @@ def get_skill_lineage(name: str):
 @app.get("/api/skills/{name}/references")
 def get_references(name: str):
     """Get skills referenced by this skill and skills that reference it."""
-    import re
-
     session = get_session()
     try:
         skill = session.query(Skill).filter_by(id=name).first()
@@ -391,7 +389,6 @@ def extend_ttl(name: str, req: ExtendTTLRequest):
 @app.post("/api/skills")
 def create_skill(req: CreateSkillRequest):
     """Create a new skill via dashboard."""
-    import json as _json
     from core.evolver import EvolutionEngine
     from core.models import Skill as SkillModel
 
@@ -532,6 +529,9 @@ def update_skill(name: str, req: UpdateSkillRequest):
         metadata = updated_frontmatter.get("metadata", {}) or {}
         updated_description = updated_frontmatter.get("description", "") or ""
         display_name = updated_frontmatter.get("display_name", "") or ""
+        # Also check metadata.display-name for consistency
+        meta_display = (updated_frontmatter.get("metadata") or {}).get("display-name", "") or ""
+        display_name = display_name or meta_display
         skill_type = metadata.get("skill-type", "IMPLEMENTATION") if metadata else "IMPLEMENTATION"
         repo = metadata.get("repo", "global") if metadata else "global"
         version = int(metadata.get("version", 1)) if metadata else 1

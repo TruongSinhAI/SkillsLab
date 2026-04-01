@@ -9,4 +9,6 @@ python-dotenv>=1.0
 pyyaml>=6.0
 
 # Semantic search (optional — BM25 works without this)
+# Recommended (no GPU needed): pip install 'skills-lab[semantic-onnx]'
+# With GPU support:       pip install 'skills-lab[semantic]'
 # sentence-transformers>=2.0

@@ -434,7 +434,8 @@ def cmd_download_model(args):
         else:
             print(f"  Failed to download '{model_name}'.")
             print(f"  Make sure sentence-transformers is installed:")
-            print(f"    pip install sentence-transformers torch")
+            print(f"    pip install 'skills-lab[semantic-onnx]'  (recommended, no GPU)")
+            print(f"    pip install 'skills-lab[semantic]'      (with GPU support)")
     else:
         # Default: try primary, fallback to backup
         print(f"  Downloading embedding model...")
@@ -448,7 +449,8 @@ def cmd_download_model(args):
             print(f"  Failed to download any embedding model.")
             print(f"  Semantic search will use BM25-only mode.")
             print(f"  Make sure sentence-transformers is installed:")
-            print(f"    pip install sentence-transformers torch")
+            print(f"    pip install 'skills-lab[semantic-onnx]'  (recommended, no GPU)")
+            print(f"    pip install 'skills-lab[semantic]'      (with GPU support)")
     print()
 
 

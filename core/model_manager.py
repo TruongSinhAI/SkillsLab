@@ -7,6 +7,10 @@ used for semantic search.
 Default model: BAAI/bge-small-en-v1.5 (~100MB)
 Fallback model: sentence-transformers/all-MiniLM-L6-v2 (~80MB)
 
+Backends (auto-selected in priority order):
+  1. ONNX Runtime — CPU-only, no torch/GPU needed (~50MB extra)
+  2. PyTorch — requires torch, works on CPU and GPU (~2GB extra)
+
 Cache locations checked (in order):
   1. sentence-transformers default cache (typically ~/.cache/torch/sentence_transformers/)
   2. HuggingFace hub cache (~/.cache/huggingface/hub/)
@@ -22,10 +26,39 @@ logger = logging.getLogger(__name__)
 DEFAULT_MODEL = "BAAI/bge-small-en-v1.5"
 FALLBACK_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 
+# Backend priority: onnxruntime (CPU-only) > torch (CPU+GPU)
+_BACKEND_PRIORITY = ["onnx", "torch"]
+
 
 # ---------------------------------------------------------------------------
 # Cache detection
 # ---------------------------------------------------------------------------
+
+
+def detect_backend() -> str:
+    """
+    Detect the best available embedding backend.
+
+    Priority:
+      1. onnxruntime — CPU-only, small footprint, no GPU/CUDA needed
+      2. torch — heavier, but supports GPU acceleration
+
+    Returns:
+        ``"onnx"`` if onnxruntime is importable, ``"torch"`` otherwise.
+        An empty string if neither is available.
+    """
+    for backend in _BACKEND_PRIORITY:
+        try:
+            if importlib.util.find_spec(backend) is not None:
+                # Extra check: onnxruntime needs onnx too
+                if backend == "onnx" and importlib.util.find_spec("onnx") is None:
+                    continue
+                logger.debug(f"Detected embedding backend: {backend}")
+                return backend
+        except Exception:
+            continue
+    logger.debug("No embedding backend detected (onnxruntime or torch)")
+    return ""
 
 
 def is_model_cached(model_name: str, workspace_path: str = "") -> bool:
@@ -119,41 +152,101 @@ def download_embedding_model(
     # Fast probe — is sentence_transformers importable?
     try:
         if importlib.util.find_spec("sentence_transformers") is None:
-            logger.warning(
-                "sentence-transformers is not installed. "
-                "Cannot download embedding model. "
-                "Install with: pip install sentence-transformers torch"
-            )
+            backend_hint = detect_backend()
+            if backend_hint:
+                logger.warning(
+                    "sentence-transformers is not installed. "
+                    "Cannot download embedding model. "
+                    f"Install with: pip install 'skills-lab[semantic-onnx]'"
+                    if backend_hint == "onnx" else
+                    "Install with: pip install 'skills-lab[semantic]'"
+                )
+            else:
+                logger.warning(
+                    "sentence-transformers is not installed and no backend detected. "
+                    "Install with: pip install 'skills-lab[semantic-onnx]' (recommended) "
+                    "or pip install 'skills-lab[semantic]'"
+                )
             return False
     except Exception:
         pass
 
+    # Select and configure the best backend
+    backend = detect_backend()
+    if not backend:
+        logger.warning("No embedding backend found (onnxruntime or torch). Cannot load model.")
+        return False
+
+    if backend == "onnx":
+        # Force ONNX backend — avoids loading torch entirely.
+        # sentence-transformers will use onnxruntime for inference.
+        os.environ.setdefault("SENTENCE_TRANSFORMERS_BACKEND", "onnx")
+        logger.info("Using ONNX backend (CPU-only, no GPU required)")
+    else:
+        # torch backend — disable CUDA if not available to avoid crashes
+        try:
+            import torch
+            if not torch.cuda.is_available():
+                logger.info("Using PyTorch CPU backend (GPU not available)")
+        except Exception:
+            logger.info("Using PyTorch backend")
+
     # Check if already cached
     if is_model_cached(model_name, workspace_path):
         logger.info(f"Model '{model_name}' is already cached.")
-        # Still load it once to verify the cache is valid
     else:
         logger.info(f"Model '{model_name}' not found in cache — downloading...")
 
     try:
         from sentence_transformers import SentenceTransformer
 
-        logger.info(f"Loading model '{model_name}' (downloading if needed)...")
+        logger.info(f"Loading model '{model_name}' (backend={backend}, downloading if needed)...")
+        t0 = _time_monotonic()
         model = SentenceTransformer(model_name)
+        elapsed = _time_monotonic() - t0
+        logger.info(f"Model '{model_name}' loaded in {elapsed:.1f}s (backend={backend})")
+
         # Quick sanity check: encode a test string
         test_vec = model.encode("test query", convert_to_numpy=True)
         if test_vec is not None and test_vec.size > 0:
             logger.info(
                 f"Model '{model_name}' ready "
-                f"(embedding dim={test_vec.shape[0]})"
+                f"(embedding dim={test_vec.shape[0]}, backend={backend})"
             )
             return True
         else:
             logger.warning(f"Model '{model_name}' loaded but produced empty embedding.")
             return False
     except Exception as e:
-        logger.error(f"Failed to download/load model '{model_name}': {e}")
+        logger.error(f"Failed to download/load model '{model_name}' (backend={backend}): {e}")
+        # If ONNX failed, try torch as last resort
+        if backend == "onnx":
+            logger.info("ONNX backend failed, trying PyTorch as fallback...")
+            os.environ.pop("SENTENCE_TRANSFORMERS_BACKEND", None)
+            return download_embedding_model.__wrapped__(model_name, workspace_path) if hasattr(download_embedding_model, "__wrapped__") else _download_torch_fallback(model_name, workspace_path)
         return False
+
+
+def _download_torch_fallback(model_name: str, workspace_path: str = "") -> bool:
+    """Internal: try loading model with torch backend after ONNX failed."""
+    try:
+        from sentence_transformers import SentenceTransformer
+        logger.info(f"Loading model '{model_name}' with PyTorch backend...")
+        model = SentenceTransformer(model_name)
+        test_vec = model.encode("test query", convert_to_numpy=True)
+        if test_vec is not None and test_vec.size > 0:
+            logger.info(f"Model '{model_name}' ready with PyTorch backend (embedding dim={test_vec.shape[0]})")
+            return True
+        return False
+    except Exception as e:
+        logger.error(f"PyTorch fallback also failed for '{model_name}': {e}")
+        return False
+
+
+def _time_monotonic() -> float:
+    """"Monotonic timer for measuring model load time."""
+    import time
+    return time.monotonic()
 
 
 def download_with_fallback(workspace_path: str = "") -> tuple[bool, str]:

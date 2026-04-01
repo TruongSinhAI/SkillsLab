@@ -19,12 +19,16 @@ Usage (CLI)::
 """
 
 import json
+import logging
 import os
 from datetime import datetime, timezone
 from typing import Any, Callable, Optional
 
 from core.manager import SKILLManager
 from core.models import Skill, SkillChangelog, get_session, init_db
+from core.exceptions import SKILLParseError
+
+logger = logging.getLogger(__name__)
 
 
 class SkillExporter:
@@ -173,7 +177,8 @@ class SkillExporter:
                 body = ""
                 try:
                     body = self.manager.read_body(skill.id)
-                except (FileNotFoundError, OSError, ValueError):
+                except (FileNotFoundError, OSError, ValueError, SKILLParseError) as e:
+                    logger.debug(f"Could not read body for skill '{skill.id}': {e}")
                     pass  # body stays empty if SKILL.md is missing or unreadable
 
                 export = self._skill_to_export_dict(skill, body=body)
@@ -286,7 +291,8 @@ class SkillExporter:
                     imported += 1
                 else:
                     skipped += 1
-            except Exception:
+            except Exception as e:
+                logger.warning(f"Failed to import skill '{skill_data.get('name', '?')}': {e}")
                 errors += 1
 
         return {"imported": imported, "skipped": skipped, "errors": errors}

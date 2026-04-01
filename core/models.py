@@ -403,8 +403,10 @@ def get_session() -> Session:
     without actually closing the underlying connection, which can lead to
     connection exhaustion under high concurrency.
     """
-    if _session_factory is None:
-        raise RuntimeError(
-            "Database not initialized. Call init_db() first."
-        )
-    return _session_factory()
+    with _db_lock:
+        if _session_factory is None:
+            raise RuntimeError(
+                "Database not initialized. Call init_db() first."
+            )
+        factory = _session_factory
+    return factory()

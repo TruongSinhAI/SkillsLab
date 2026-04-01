@@ -371,6 +371,14 @@ class EvolutionEngine:
         if self.session.query(Skill).filter_by(id=new_name).first():
             raise ValueError(f"Skill '{new_name}' already exists.")
 
+        # Validate skill_type against known enum values (same as archive())
+        if skill_type is not None:
+            valid_types = {t.value for t in SkillType}
+            if skill_type not in valid_types:
+                raise ValueError(
+                    f"Invalid skill_type '{skill_type}'. Must be one of: {', '.join(sorted(valid_types))}"
+                )
+
         now = datetime.now(timezone.utc)
         display_name = new_name.replace("-", " ").title()
 

@@ -143,14 +143,26 @@ class SKILLManager:
         if not raw.startswith(FRONTMATTER_DELIMITER):
             raise SKILLParseError("SKILL.md must start with YAML frontmatter (---)")
 
-        # Find closing ---
+        # Find closing --- (must be on its own line: \n---\n)
+        # Using "\n---\n" pattern avoids matching "---" inside YAML values
+        # e.g. description: "Use --- to separate sections" won't break parsing
         rest = raw[len(FRONTMATTER_DELIMITER):]
-        end_idx = rest.find(FRONTMATTER_DELIMITER)
+        closing_pattern = "\n" + FRONTMATTER_DELIMITER + "\n"
+        end_idx = rest.find(closing_pattern)
         if end_idx == -1:
-            raise SKILLParseError("SKILL.md frontmatter not closed (missing ---)")
+            # Fallback: try "\n---" at EOF (no trailing newline)
+            eof_pattern = "\n" + FRONTMATTER_DELIMITER
+            end_idx = rest.find(eof_pattern)
+            if end_idx == -1 or end_idx + len(FRONTMATTER_DELIMITER) < len(rest):
+                raise SKILLParseError("SKILL.md frontmatter not closed (missing ---)")
+            # Point to the \n before --- for body extraction
+            body_start = end_idx + len(eof_pattern)
+        else:
+            # Point to the \n before --- (closing_pattern starts with \n)
+            body_start = end_idx + len(closing_pattern)
 
-        yaml_str = rest[:end_idx].strip()
-        body = rest[end_idx + len(FRONTMATTER_DELIMITER):].strip()
+        yaml_str = rest[:end_idx + 1].strip()  # +1 to include the leading \n
+        body = rest[body_start:].strip()
 
         if not yaml_str:
             raise SKILLParseError("SKILL.md frontmatter is empty")
@@ -326,7 +338,7 @@ class SKILLManager:
             skill_name: Kebab-case skill identifier (also used as the directory name).
             description: Short description used for agent matching.
             body: Markdown body content (When to Use, Solution, Lessons Learned, ...).
-            display_name: Optional human-readable name (currently unused in output).
+            display_name: Optional human-readable name (stored in metadata.display-name).
             skill_type: Skill type classifier (e.g. ``"IMPLEMENTATION"``).
             repo: Repository name or ``"global"``.
             version: Version number.
@@ -361,6 +373,8 @@ class SKILLManager:
             "created": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
             "last-modified": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
         }
+        if display_name:
+            metadata["display-name"] = display_name
         if ttl_days is not None:
             metadata["ttl-days"] = ttl_days
         if author:
@@ -545,8 +559,10 @@ class SKILLManager:
 
         frontmatter, body = self._parse_frontmatter(raw)
 
-        if "metadata" in frontmatter and isinstance(frontmatter["metadata"], dict):
-            frontmatter["metadata"]["version"] = str(version)
+        # Ensure metadata dict exists
+        if "metadata" not in frontmatter or not isinstance(frontmatter["metadata"], dict):
+            frontmatter["metadata"] = {}
+        frontmatter["metadata"]["version"] = str(version)
         now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         frontmatter["metadata"]["last-modified"] = now
 
@@ -560,6 +576,32 @@ class SKILLManager:
     # Skill lifecycle
     # -----------------------------------------------------------------------
 
+    def _validate_skill_path(self, skill_name: str, path: str) -> None:
+        """Validate that a resolved path stays within the skills directory.
+
+        Prevents path traversal attacks where skill_name contains '../' or
+        other sequences that could escape the workspace.
+
+        Args:
+            skill_name: The skill identifier used to construct the path.
+            path: The resolved filesystem path.
+
+        Raises:
+            ValueError: If the path escapes the skills directory.
+        """
+        # Reject obviously malicious names
+        if ".." in skill_name or skill_name.startswith("/"):
+            raise ValueError(
+                f"Invalid skill name '{skill_name}': must not contain '..' or start with '/'"
+            )
+        # Resolve to absolute path and verify it's under skills_dir
+        real_path = os.path.realpath(path)
+        real_skills_dir = os.path.realpath(self.skills_dir)
+        if not real_path.startswith(real_skills_dir + os.sep) and real_path != real_skills_dir:
+            raise ValueError(
+                f"Path traversal detected: '{skill_name}' resolves outside skills directory"
+            )
+
     def delete_skill_dir(self, skill_name: str) -> None:
         """
         Delete the entire physical directory of a skill.
@@ -568,8 +610,12 @@ class SKILLManager:
 
         Args:
             skill_name: Kebab-case skill identifier.
+
+        Raises:
+            ValueError: If the skill name contains path traversal characters.
         """
         dir_path = self._skill_dir(skill_name)
+        self._validate_skill_path(skill_name, dir_path)
         if os.path.exists(dir_path):
             shutil.rmtree(dir_path)
 
